@@ -33,13 +33,18 @@ python -m src
 Train the VQVAE with
 
 ```
-python -m src.vqvae.train data.folder=path/to/tif/images data.mean=somevalue data.std=somevalue
+python -m src.vqvae.train data.folder=path/to/tif/images data.mean=somevalue data.std=somevalue logdir=path/to/output/of/training
 ```
 
 Example:
 
 ```
-python -m src.vqvae.train data.folder=/mnt/data/wildfire/imgs1 data.mean=2.7935 data.std=5.9023
+python -m src.vqvae.train data.folder=/mnt/data/wildfire/imgs1 data.mean=2.7935 data.std=5.9023 logdir=/mnt/data/wildfire/runs
+```
+
+Monitor the training progress via tensorboard with
+
+```
 ```
 
 Augment the thermal images by simulating new a environment temperature with
@@ -51,7 +56,12 @@ python -m src.augment_data data
 Train the LDM with
 
 ```
-python -m src.ldm.train vqvae_checkpoint=path/to/vqvae.ckpt data.folder=path/to/tif/images data.mean=somevalue data.std=somevalue
+python -m src.ldm.train vqvae_checkpoint=path/to/vqvae.ckpt data.folder=path/to/tif/images data.mean=somevalue data.std=somevalue logdir=path/to/output/of/training
+```
+
+Example:
+
+```
 ```
 
 ## Running FID Analytics

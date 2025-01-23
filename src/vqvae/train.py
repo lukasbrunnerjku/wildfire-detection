@@ -39,6 +39,8 @@ from ..utils.image import (
     pil_make_grid,
     tone_mapping,
 )
+from ..utils.data import DataModule
+from ..utils.lit_ema import EMACallback
 
 
 class AutoEncoderType(Enum):
@@ -48,6 +50,7 @@ class AutoEncoderType(Enum):
 
 @dataclass
 class TrainConfig:
+    logdir: Optional[str] = None
     ae_type: AutoEncoderType = AutoEncoderType.VQModel
     quantizer_type: QuantizerType = QuantizerType.LFQ
     codebook_size: CodebookSize = CodebookSize.MEDIUM
@@ -86,63 +89,6 @@ class TrainConfig:
     fast_dev_run: bool = False
 
     def __post_init__(self):
-        if self.ae_type == AutoEncoderType.AutoencoderKL:
-            self.ae_class = AutoencoderKL
-            self.ae_config = dict(
-                in_channels=1,
-                out_channels=1,
-                latent_channels=self.latent_dim,
-                sample_size=self.data.image_size,
-                block_out_channels=(64, 128, 256),
-                mid_block_add_attention=False,
-                down_block_types=(
-                    "DownEncoderBlock2D",
-                    "DownEncoderBlock2D",
-                    "DownEncoderBlock2D",
-                ),
-                up_block_types=(
-                    "UpDecoderBlock2D",
-                    "UpDecoderBlock2D",
-                    "UpDecoderBlock2D",
-                ),
-            )
-            self.ae_stride = 4
-
-        elif self.ae_type == AutoEncoderType.VQModel:
-            self.ae_class = VQModel
-
-            base_two_exponent = int(math.log2(self.codebook_size.value))
-            quantize = Quantizer(self.quantizer_type, base_two_exponent)
-            self.latent_dim = quantize.quantizer.codebook_dim
-
-            # In case of FSQ it is approximately the given codebook size.
-            self.codebook_size = quantize.quantizer.codebook_size
-
-            if self.quantizer_type == QuantizerType.LFQ:
-                # Proper weighting already done inside the quantizer.
-                self.commit_weight = 1.0
-
-            self.ae_config = dict(
-                in_channels=1,
-                out_channels=1,
-                num_vq_embeddings=self.codebook_size,
-                vq_embed_dim=self.latent_dim,
-                latent_channels=self.latent_dim,
-                block_out_channels=(64, 128, 256),
-                mid_block_add_attention=False,
-                down_block_types=(
-                    "DownEncoderBlock2D",
-                    "DownEncoderBlock2D",
-                    "DownEncoderBlock2D",
-                ),
-                up_block_types=(
-                    "UpDecoderBlock2D",
-                    "UpDecoderBlock2D",
-                    "UpDecoderBlock2D",
-                ),
-            )
-            self.ae_stride = 4
-        
         if self.num_workers == -1:
             self.num_workers = cpu_count()
 
@@ -155,8 +101,60 @@ class VQVAE(LightningModule):
 
     def __init__(self, config=None):
         super().__init__()
-        self.ae = config.ae_class(**config.ae_config)
+
+        if config.ae_type == AutoEncoderType.AutoencoderKL:
+            self.ae = AutoencoderKL(
+                in_channels=1,
+                out_channels=1,
+                latent_channels=config.latent_dim,
+                sample_size=config.data.image_size,
+                block_out_channels=(64, 128, 256),
+                mid_block_add_attention=False,
+                down_block_types=(
+                    "DownEncoderBlock2D",
+                    "DownEncoderBlock2D",
+                    "DownEncoderBlock2D",
+                ),
+                up_block_types=(
+                    "UpDecoderBlock2D",
+                    "UpDecoderBlock2D",
+                    "UpDecoderBlock2D",
+                ),
+            )
+        elif config.ae_type == AutoEncoderType.VQModel:
+            base_two_exponent = int(math.log2(config.codebook_size.value))
+            quantize = Quantizer(config.quantizer_type, base_two_exponent)
+            config.latent_dim = quantize.quantizer.codebook_dim
+
+            # In case of FSQ it is approximately the given codebook size.
+            self.codebook_size = quantize.quantizer.codebook_size
+
+            if config.quantizer_type == QuantizerType.LFQ:
+                # Proper weighting already done inside the quantizer.
+                config.commit_weight = 1.0
+
+            self.ae = VQModel(
+                in_channels=1,
+                out_channels=1,
+                num_vq_embeddings=self.codebook_size,
+                vq_embed_dim=config.latent_dim,
+                latent_channels=config.latent_dim,
+                block_out_channels=(64, 128, 256),
+                mid_block_add_attention=False,
+                down_block_types=(
+                    "DownEncoderBlock2D",
+                    "DownEncoderBlock2D",
+                    "DownEncoderBlock2D",
+                ),
+                up_block_types=(
+                    "UpDecoderBlock2D",
+                    "UpDecoderBlock2D",
+                    "UpDecoderBlock2D",
+                ),
+            )
+        
         self.perceptual_loss = PerceptualLoss(config.resnet_type, config.up_to_layer)
+        
         if config.adv.start_step >= 0:
             self.adversarial_loss = AdversarialLoss(
                 in_channels=1,
@@ -383,7 +381,7 @@ class VQVAE(LightningModule):
                 quant2, quant if self.ae.config.norm_type == "spatial" else None
             )  # BxCxHxW
             if self.global_rank == 0:
-                code_size = self.config.codebook_size
+                code_size = self.codebook_size  # Might be different than config.codebook_size!
                 code_counts = torch.bincount(code_indices, minlength=code_size)
                 self.validation_step_hist = self.validation_step_hist + code_counts.cpu()
         else:
@@ -473,14 +471,66 @@ def main():
     args = OmegaConf.from_cli()
     conf = OmegaConf.merge(conf, args)
 
+    assert conf.logdir is not None
     assert conf.data.folder is not None
     assert conf.data.mean is not None
     assert conf.data.std is not None
 
     print(conf)
 
+    manual_seed_all(conf.seed)
+    set_torch_options()
+
+    datamodule = DataModule(conf)
+    model = VQVAE(conf)
+
+    lr_monitor = LearningRateMonitor(logging_interval="step")
+    model_checkpoint = ModelCheckpoint(
+        filename="{step:03d}-{fid_score:.3f}",
+        save_top_k=1,
+        monitor="fid_score",
+        mode="min",  # Lower FID is better!
+        save_last=True,
+        save_weights_only=False,
+    )
+
+    callbacks = [lr_monitor, model_checkpoint]
+
+    if conf.use_ema:
+        callbacks.append(EMACallback(
+            model=model.ae,
+            decay=conf.ema_decay,
+            update_every=conf.ema_update_every,
+            update_after_step=conf.ema_update_after_step,
+        ))
+
+    max_steps = (conf.warmup_steps + conf.train_steps)
+
+    if conf.adv.start_step >= 0:
+        max_steps *= 2
+
+    trainer = Trainer(
+        fast_dev_run=4 * int(conf.fast_dev_run),
+        accelerator=conf.device,
+        devices="0,",
+        strategy="auto",
+        num_nodes=1,
+        log_every_n_steps=conf.log_every_n_steps,
+        max_steps=max_steps,
+        val_check_interval=conf.val_every_n_steps,
+        precision="16-mixed",
+        logger=TensorBoardLogger(
+            conf.logdir,
+            name=model.__class__.__name__,
+            default_hp_metric=False,
+        ),
+        callbacks=callbacks,
+        gradient_clip_val=conf.gradient_clip_val,
+        gradient_clip_algorithm="norm",
+        num_sanity_val_steps=-1,  
+    )
+    trainer.fit(model=model, datamodule=datamodule)
+
 
 if __name__ == "__main__":
-    """
-    """
     main()
