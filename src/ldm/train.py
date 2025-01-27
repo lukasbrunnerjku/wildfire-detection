@@ -1,90 +1,135 @@
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Dict, Any
 from omegaconf import OmegaConf
 from multiprocessing import cpu_count
+import torch
+from torch import Tensor
+from PIL import Image
+import numpy as np
+import torch.nn.functional as F
+from diffusers import VQModel, DDIMScheduler
+from diffusers.training_utils import EMAModel, compute_snr
+import gc
+import logging
+from lightning.pytorch.callbacks import Callback
+from lightning.pytorch import LightningModule, Trainer
+from lightning.pytorch.utilities import rank_zero_only
+from lightning.pytorch.loggers.tensorboard import TensorBoardLogger
+from lightning.pytorch.callbacks.lr_monitor import LearningRateMonitor
+from lightning.pytorch.callbacks.model_checkpoint import ModelCheckpoint
 
+from .model import UNet2DModel, LDMPipeline
 from ..utils.conf import DataConfig
+from ..utils.lit_logging import setup_logger, log_main_process
+from ..utils.torch_conf import manual_seed_all, set_torch_options
+from ..utils.weight_decay import adjusted_weight_decay, weight_decay_parameter_split
+from ..utils.fid import FID, build_fid_metric
+from ..utils.image import (
+    normalize_tif,
+    denormalize_tif,
+    pil_make_grid,
+    tone_mapping,
+)
+from ..utils.data import DataModule
+from ..vqvae.train import load_ae_from_checkpoint, AutoEncoderType
 
-# mean, std of data: mean: float = 2.7935, std: float = 5.9023
 
-class LitLDM(LightningModule):
+@dataclass
+class TrainConfig:
+    logdir: Optional[str] = None
+    vqvae_checkpoint: Optional[str] = None
+    train_batch_size: int = 16
+    eval_batch_size: int = 128
+    learning_rate: float = 1e-4
+    min_learning_rate: float = 1e-5
+    weight_decay: float = 1e-4
+    beta1: float = 0.9
+    beta2: float = 0.99
+    warmup_steps: int = 500
+    train_steps: int = 19500
+    seed: int = 42
+    device: str = "cuda"
+    num_workers: int = -1
+    log_every_n_steps: int = 50
+    vis_every_n_steps: int = 500 
+    val_every_n_steps: int = 500
+    num_sanity_steps: int = -1
+    gradient_clip_val: float = 1.0
+    use_ema: bool = True
+    ema_power: float = 0.75
+    ema_max_decay: float = 0.995
+    snr_gamma: float = 5.0
+    data: DataConfig = field(default_factory=DataConfig)
+    fast_dev_run: bool = False
+
+    def __post_init__(self):
+        if self.num_workers == -1:
+            self.num_workers = cpu_count()
+
+        if self.fast_dev_run:
+            self.num_workers = 0
+            self.num_sanity_steps = 2
+
+
+class LDM(LightningModule):
 
     def __init__(self, config=None):
         super().__init__()
         self.config = config
         self.save_hyperparameters(config)
+
+        self.restarted_from_ckpt = False
         
-        self.vqvae: VQModel = load_ae_from_checkpoint_(None, config.load_ae_checkpoint)
+        self.vqvae: VQModel = load_ae_from_checkpoint(config.vqvae_checkpoint)
         stride = 2**(len(self.vqvae.encoder.down_blocks) - 1)
         latent_dim: int = self.vqvae.config.vq_embed_dim
     
-        self.unet_config = dict(
-            sample_size=int(config.image_size / stride),
+        self.unet = UNet2DModel(
+            sample_size=int(config.data.image_size / stride),
             in_channels=latent_dim,
             out_channels=latent_dim,
             layers_per_block=2,
-            block_out_channels=(128, 128, 256, 256, 512, 512),
+            block_out_channels=(128, 128, 256, 256, 512),
             down_block_types=(
                 "DownBlock2D",
                 "DownBlock2D",
                 "DownBlock2D",
                 "DownBlock2D",
-                "AttnDownBlock2D",
                 "DownBlock2D",
             ),
             up_block_types=(
                 "UpBlock2D",
-                "AttnUpBlock2D",
                 "UpBlock2D",
                 "UpBlock2D",
                 "UpBlock2D",
                 "UpBlock2D",
             ),
         )
-        self.unet = UNet2DModel(**self.unet_config)
-        self.restarted_from_ckpt = False
+        
+        self.noise_scheduler = DDIMScheduler(
+            num_train_timesteps=1000,
+            beta_start=0.00085,
+            beta_end=0.012,
+            beta_schedule="scaled_linear",
+            clip_sample=False,
+            set_alpha_to_one=False,
+            steps_offset=1,
+            prediction_type="v_prediction",
+            thresholding=False,
+            dynamic_thresholding_ratio=0.995,
+            clip_sample_range=1.0,
+            sample_max_value=1.0,
+            timestep_spacing="trailing",
+            rescale_betas_zero_snr=True,
+        )  # https://arxiv.org/pdf/2305.08891
 
-        # From "ptx0/pseudo-journey-v2" Huggingface model
-        # See stable_diffusion.py --> pipe.scheduler.config
-        stable_diffusion_kwargs = {
-            "num_train_timesteps": 1000,
-            "beta_start": 0.00085,
-            "beta_end": 0.012,
-            "beta_schedule": "scaled_linear",
-            "clip_sample": False,
-            "set_alpha_to_one": False,
-            "steps_offset": 1,
-            # https://arxiv.org/pdf/2305.08891
-            # When SNR is zero, ϵ prediction becomes a trivial task and ϵ
-            # loss cannot guide the model to learn anything meaningful about
-            # the data, thus if prediction_type is "epsilon" set
-            # "rescale_betas_zero_snr" to False!
-            # (--> see 3.2. Train with V Prediction and V Loss)
-            "prediction_type": "v_prediction",
-            "thresholding": False,
-            "dynamic_thresholding_ratio": 0.995,
-            "clip_sample_range": 1.0,
-            "sample_max_value": 1.0,
-            # https://arxiv.org/pdf/2305.08891
-            # (--> see 3.3. Sample from the Last Timestep)
-            "timestep_spacing": "trailing",
-            # https://arxiv.org/pdf/2305.08891
-            # SNR(T) is otherwise in standard implementations not zero
-            # thus it would result in discrepancy between training/inference
-            # because in training the lowest frequencies would be kept while 
-            # during inference we sample from pure noise. Note that T is the 
-            # timestep at which we should have pure noise.
-            # (--> see 3.1 Enforce Zero Terminal SNR)
-            "rescale_betas_zero_snr": True,
-        }
-        self.noise_scheduler = DDIMScheduler(**stable_diffusion_kwargs)
         self.pipeline = LDMPipeline(
             vqvae=self.vqvae,
             unet=self.unet,
             scheduler=self.noise_scheduler,
         )
 
-        self.fid: CustomFID = build_custom_fid_metric(image_size=config.image_size)
+        self.fid: FID = build_fid_metric(image_size=config.data.image_size)
 
         self.config = config
         self.first_validation_epoch_end = True
@@ -130,9 +175,13 @@ class LitLDM(LightningModule):
     @rank_zero_only
     @torch.no_grad()
     def on_train_batch_start(self, batch, batch_idx):
-        if self.current_epoch == 0 and self.global_step == 0 and batch_idx == 0 and not self.restarted_from_ckpt:
+        if (
+            self.global_step == 0
+            and batch_idx == 0
+            and not self.restarted_from_ckpt
+        ):
             x = batch  # BxCxHxW; float32; on target device
-            x = normalize_tif(x)  # ~N(0, 1)
+            x = normalize_tif(x, self.config.data.mean, self.config.data.std)  # ~N(0, 1)
             
             with torch.inference_mode():
                 h = self.vqvae.encode(x).latents  # BxCxHxW
@@ -154,6 +203,8 @@ class LitLDM(LightningModule):
     ) -> list[Image.Image]:
         # Sample some images from random noise (this is the backward diffusion process).
         images: list[Image.Image] = self.pipeline(
+            self.config.data.mean,
+            self.config.data.std,
             batch_size=batch_size,
             generator=generator,
             output_type=output_type,
@@ -171,11 +222,11 @@ class LitLDM(LightningModule):
     
     def training_step(self, batch, batch_idx) -> Tensor:
         x = batch  # BxCxHxW; float32; on target device
-        x = normalize_tif(x)  # ~N(0, 1)
+        x = normalize_tif(x, self.config.data.mean, self.config.data.std)  # ~N(0, 1)
 
         if self.global_rank == 0 and self.global_step == 0:
             # Visualize an example batch of real-world images.
-            subset_x = denormalize_tif(x[:9].cpu())
+            subset_x = denormalize_tif(x[:9].cpu(), self.config.data.mean, self.config.data.std)
             imgs = [tone_mapping(img, img.min(), img.max()) for img in subset_x]
             grid: Image.Image = pil_make_grid(imgs, ncol=3)
             self.logger.experiment.add_image(
@@ -203,16 +254,11 @@ class LitLDM(LightningModule):
 
         target = self.noise_scheduler.get_velocity(h, noise, timesteps)
         
-        # NOTE: With "v_prediction" the model_output is not the noise epsilon, but the velocity.
-        # https://github.com/huggingface/diffusers/blob/main/examples/text_to_image/train_text_to_image.py
         noise_pred = self.unet(noisy_h, timesteps, return_dict=False)[0]
 
         if self.config.snr_gamma == 0.0:
             loss = F.mse_loss(noise_pred.float(), target.float(), reduction="mean")
         else:
-            # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
-            # Since we predict the noise instead of x_0, the original formulation is slightly changed.
-            # This is discussed in Section 4.2 of the same paper.
             snr = compute_snr(self.noise_scheduler, timesteps)
             mse_loss_weights = torch.stack([snr, self.config.snr_gamma * torch.ones_like(timesteps)], dim=1).min(
                 dim=1
@@ -244,9 +290,11 @@ class LitLDM(LightningModule):
         x_float: Tensor = batch  # BxCxHxW; float32; on target device
 
         # Use a separate torch generator to avoid rewinding the random state of the main training loop
-        generator = torch.Generator(device="cpu").manual_seed(config.seed)
+        generator = torch.Generator(device="cpu").manual_seed(self.config.seed)
         # Sample some images from random noise (this is the backward diffusion process).
         x_hat_float: np.ndarray = self.pipeline(
+            self.config.data.mean,
+            self.config.data.std,
             batch_size=x_float.shape[0],
             generator=generator,
             output_type="raw",
@@ -281,42 +329,70 @@ class LitLDM(LightningModule):
         torch.cuda.empty_cache()
 
 
+class EMACallbackUNet(Callback):
+    """
+    Model Exponential Moving Average. Empirically it has been found that using the moving average
+    of the trained parameters of a deep network is better than using its trained parameters directly.
 
+    The ema parameters of the network is set after training end.
 
+    Adapted from lightning callback
+    https://github.com/benihime91/gale/blob/master/gale/collections/callbacks/ema.py
+    """
 
-@dataclass
-class TrainConfig:
-    vqvae_checkpoint: Optional[str] = None
-    train_batch_size: int = 16
-    eval_batch_size: int = 128
-    learning_rate: float = 1e-4
-    min_learning_rate: float = 1e-5
-    beta1: float = 0.9
-    beta2: float = 0.99
-    warmup_steps: int = 500
-    train_steps: int = 19500
-    seed: int = 42
-    device: str = "cuda"
-    num_workers: int = -1
-    log_every_n_steps: int = 50
-    vis_every_n_steps: int = 500 
-    val_every_n_steps: int = 500
-    num_sanity_steps: int = -1
-    gradient_clip_val: float = 1.0
-    use_ema: bool = True
-    ema_power: float = 0.75
-    ema_max_decay: float = 0.995
-    snr_gamma: float = 5.0
-    data: DataConfig = field(default_factory=DataConfig)
-    fast_dev_run: bool = True
+    def __init__(self):
+        self.ema = None
+        self.logger = None
 
-    def __post_init__(self):
-        if self.num_workers == -1:
-            self.num_workers = cpu_count()
+    def on_fit_start(self, trainer, pl_module: LDM):
+        config = pl_module.hparams
+        self.ema = EMAModel(
+            pl_module.unet.parameters(),
+            decay=config.ema_max_decay,
+            use_ema_warmup=True,
+            power=config.ema_power,
+            model_cls=UNet2DModel,
+            model_config=pl_module.unet.config,
+        )
+        self.logger = setup_logger(trainer.global_rank)
 
-        if self.fast_dev_run:
-            self.num_workers = 0
-            self.num_sanity_steps = 2
+    def on_train_batch_end(
+        self, trainer, pl_module: LDM, outputs, batch, batch_idx,
+    ):
+        # Update currently maintained parameters.
+        self.ema.step(pl_module.unet.parameters())
+
+    def on_validation_epoch_start(self, trainer, pl_module: LDM):
+        # save original parameters before replacing with EMA version
+        self.ema.store(pl_module.unet.parameters())
+
+        # copy EMA parameters to UNet model
+        self.ema.copy_to(pl_module.unet.parameters())
+
+        log_main_process(
+            self.logger,
+            logging.INFO,
+            "Using EMA weights for UNet in validation loop.",
+        )
+        
+    def on_validation_end(self, trainer, pl_module: LDM):
+        "Restore original parameters to resume training later"
+        self.ema.restore(pl_module.unet.parameters())
+
+    def on_train_end(self, trainer, pl_module: LDM):
+        # copy EMA parameters to UNet model
+        self.ema.copy_to(pl_module.unet.parameters())
+            
+    def on_save_checkpoint(self, trainer, pl_module: LDM, checkpoint: Dict[str, Any]) -> None:
+        # checkpoint: the checkpoint dictionary that will be saved.
+        checkpoint["state_dict_ema"] = self.ema.state_dict()
+
+    def on_load_checkpoint(self, trainer, pl_module: LDM, checkpoint: Dict[str, Any]) -> None:
+        # https://github.com/zyinghua/uncond-image-generation-ldm/blob/main/train.py#L339
+        self.ema.load_state_dict(checkpoint["state_dict_ema"])
+
+        # copy EMA parameters to UNet model
+        self.ema.copy_to(pl_module.unet.parameters())
 
 
 def main():
@@ -325,13 +401,59 @@ def main():
     conf = OmegaConf.merge(conf, args)
 
     assert conf.vqvae_checkpoint is not None
+    assert conf.logdir is not None
     assert conf.data.folder is not None
+    assert conf.data.mean is not None
+    assert conf.data.std is not None
 
     print(conf)
 
+    manual_seed_all(conf.seed)
+    set_torch_options()
+
+    datamodule = DataModule(conf)
+    model = LDM(conf)
+
+    lr_monitor = LearningRateMonitor(logging_interval="step")
+    model_checkpoint = ModelCheckpoint(
+        filename="{step:03d}-{fid_score:.3f}",
+        save_top_k=1,
+        monitor="fid_score",
+        mode="min",  # Lower FID is better!
+        save_last=True,
+        save_weights_only=False,
+    )
+
+    callbacks = [lr_monitor, model_checkpoint]
+
+    if conf.use_ema:
+        callbacks.append(EMACallbackUNet())
+
+    max_steps = (conf.warmup_steps + conf.train_steps)
+
+    trainer = Trainer(
+        fast_dev_run=4 * int(conf.fast_dev_run),
+        accelerator=conf.device,
+        devices="0,",
+        strategy="auto",
+        num_nodes=1,
+        log_every_n_steps=conf.log_every_n_steps,
+        max_steps=max_steps,
+        val_check_interval=conf.val_every_n_steps,
+        precision="16-mixed",
+        logger=TensorBoardLogger(
+            conf.logdir,
+            name=model.__class__.__name__,
+            default_hp_metric=False,
+        ),
+        callbacks=callbacks,
+        gradient_clip_val=conf.gradient_clip_val,
+        gradient_clip_algorithm="norm",
+        num_sanity_val_steps=conf.num_sanity_steps,  
+    )
+    trainer.fit(model=model, datamodule=datamodule)
+
 
 if __name__ == "__main__":
-    """
-    
-    """
+    # python -m src.ldm.train data.folder=/mnt/data/wildfire/imgs1 data.mean=2.7935 data.std=5.9023 logdir=/mnt/data/wildfire/runs vqvae_checkpoint=/mnt/data/wildfire/runs/VQVAE/version_1/checkpoints/last.ckpt
     main()

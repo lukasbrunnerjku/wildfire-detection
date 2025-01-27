@@ -18,7 +18,7 @@ from diffusers.models.unets.unet_2d import (
     UNetMidBlock2D, get_up_block, UNet2DOutput,
 )
 
-from ..image_utils import (
+from ..utils.image import (
     denormalize_tif,
     tone_mapping,
 )
@@ -365,6 +365,9 @@ class LDMPipeline(DiffusionPipeline):
     @torch.inference_mode()
     def __call__(
         self,
+        # Requires mean/std for denormalization!
+        image_mean: float,
+        image_std: float,
         batch_size: int = 1,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         eta: float = 0.0,
@@ -426,7 +429,7 @@ class LDMPipeline(DiffusionPipeline):
         image = self.vqvae.decode(latents).sample
 
         # we predict normalize temperature values, thus denormalize first
-        image = denormalize_tif(image).cpu()  # Bx1xHxW
+        image = denormalize_tif(image, image_mean, image_std).cpu()  # Bx1xHxW
 
         if output_type == "pil":
             image: List[Image.Image] = [tone_mapping(img, img.min(), img.max()) for img in image]

@@ -467,6 +467,16 @@ class VQVAE(LightningModule):
         torch.cuda.empty_cache()
     
 
+def load_ae_from_checkpoint(ckpt: str):
+    ckpt = torch.load(ckpt, weights_only=False)
+    state_dict = ckpt["state_dict"]
+    conf = ckpt["hyper_parameters"]
+    model = VQVAE(conf)
+    model.load_state_dict(state_dict)
+    model.freeze()
+    return model.ae
+    
+
 def main():
     conf = OmegaConf.structured(TrainConfig())
     args = OmegaConf.from_cli()
@@ -534,4 +544,5 @@ def main():
 
 
 if __name__ == "__main__":
+    # python -m src.vqvae.train data.folder=/mnt/data/wildfire/imgs1 data.mean=2.7935 data.std=5.9023 logdir=/mnt/data/wildfire/runs
     main()

@@ -27,7 +27,13 @@ The original thermal data mean and standard deviation is 2.7935 and 5.9023, for 
 augmented thermal data statistics can be calcualted with
 
 ```
-python -m src
+python -m src.scripts.statistics path/to/tif/images
+```
+
+Example 
+
+```
+python -m src.scripts.statistics /mnt/data/wildfire/imgs1
 ```
 
 Train the VQVAE with
@@ -42,15 +48,16 @@ Example:
 python -m src.vqvae.train data.folder=/mnt/data/wildfire/imgs1 data.mean=2.7935 data.std=5.9023 logdir=/mnt/data/wildfire/runs
 ```
 
-Monitor the training progress via tensorboard with
+Monitor the training progress via tensorboard with ie.
 
 ```
+tensorboard --logdir="/mnt/data/wildfire/runs"
 ```
 
 Augment the thermal images by simulating new a environment temperature with
 
 ```
-python -m src.augment_data data
+python -m src.augmentation 
 ```
 
 Train the LDM with
@@ -62,6 +69,7 @@ python -m src.ldm.train vqvae_checkpoint=path/to/vqvae.ckpt data.folder=path/to/
 Example:
 
 ```
+python -m src.ldm.train vqvae_checkpoint=/mnt/data/wildfire/runs/VQVAE/version_4/checkpoints/step=39500-fid_score=4.704.ckpt data.folder=/mnt/data/wildfire/imgs1 data.mean=2.7935 data.std=5.9023 logdir=/mnt/data/wildfire/runs
 ```
 
 ## Running FID Analytics
