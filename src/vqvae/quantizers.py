@@ -143,17 +143,17 @@ class Quantizer(nn.Module):
     def forward(self, z: Tensor):  # BxCxHxW
         perplexity, min_encodings = None, None
 
-        if self.quantizer_type == "FSQ":
+        if self.quantizer_type == QuantizerType.FSQ:
             z_q, ind = self.quantizer(z)
             ind = ind.view(-1)  # BxHxW --> N,
             loss = torch.zeros([1], device=z_q.device)
-        elif self.quantizer_type == "LFQ":
+        elif self.quantizer_type == QuantizerType.LFQ:
             ret = self.quantizer(z)
             z_q = ret.quantized
             ind = ret.indices
             ind = ind.view(-1)  # BxHxW --> N,
             loss = ret.entropy_aux_loss
-        elif self.quantizer_type == "NSVQ":
+        elif self.quantizer_type == QuantizerType.NSVQ:
             z_q, loss, ind = self.quantizer(z)
 
         # assert z_q.shape == z.shape  # BxCxHxW

@@ -152,6 +152,7 @@ class VQVAE(LightningModule):
                     "UpDecoderBlock2D",
                 ),
             )
+            self.ae.quantize = quantize
         
         self.perceptual_loss = PerceptualLoss(config.resnet_type, config.up_to_layer)
         
