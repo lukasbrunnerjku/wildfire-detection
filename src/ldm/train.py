@@ -38,7 +38,7 @@ from ..vqvae.train import load_ae_from_checkpoint, AutoEncoderType
 class TrainConfig:
     logdir: Optional[str] = None
     vqvae_checkpoint: Optional[str] = None
-    block_out_channels: list[int] = field(default_factory=lambda: [128, 128, 256, 256, 512])
+    block_out_channels: list[int] = field(default_factory=lambda: [64, 128, 256, 512])
     train_batch_size: int = 16
     eval_batch_size: int = 128
     learning_rate: float = 1e-4
@@ -85,7 +85,6 @@ class LDM(LightningModule):
         stride = 2**(len(self.vqvae.encoder.down_blocks) - 1)
         latent_dim: int = self.vqvae.config.vq_embed_dim
 
-        config.block_out_channels = [128, 128, 256, 256, 512]  # TODO
         n_unet_blocks = len(config.block_out_channels)
         self.unet = UNet2DModel(
             sample_size=int(config.data.image_size / stride),

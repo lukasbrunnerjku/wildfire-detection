@@ -429,14 +429,14 @@ class LDMPipeline(DiffusionPipeline):
         image = self.vqvae.decode(latents).sample
 
         # we predict normalize temperature values, thus denormalize first
-        image = denormalize_tif(image, image_mean, image_std).cpu()  # Bx1xHxW
+        image = denormalize_tif(image, image_mean, image_std)  # Bx1xHxW
 
         if output_type == "pil":
-            image: List[Image.Image] = [tone_mapping(img, img.min(), img.max()) for img in image]
+            image: List[Image.Image] = [tone_mapping(img, img.min(), img.max()) for img in image.cpu()]
         elif output_type == "np":
-            image: np.ndarray = tone_mapping(image, return_tensor=True).numpy()  # BxCxHxW; [0, 255]
+            image: np.ndarray = tone_mapping(image.cpu(), return_tensor=True).numpy()  # BxCxHxW; [0, 255]
         elif output_type == "raw":
-            image: Tensor = image.to(self.device)  # Returns denormalized image tensor Bx1xHxW; float32!
+            image: Tensor = image  # .to(self.device)  # Returns denormalized image tensor Bx1xHxW; float32!
         else:
             raise ValueError(f"Unknow value: {output_type=}")
 

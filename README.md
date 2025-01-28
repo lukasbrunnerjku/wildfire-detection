@@ -83,7 +83,7 @@ python -m src.ldm.train vqvae_checkpoint=/mnt/data/wildfire/runs/VQVAE/version_4
 Generating novel images with the LDM with
 
 ```
-python -m src.scripts.generate path/to/save/new/images path/to/ldm.ckpt num_of_images --batch_size 512
+python -m src.scripts.generate path/to/save/new/images path/to/ldm.ckpt num_of_images
 ```
 
 Select highest batch size that fits in memory to speed up generation process.

@@ -21,7 +21,7 @@ if __name__ == "__main__":
     parser.add_argument("save_dir", help="Where to save the generated images?")
     parser.add_argument("ldm_checkpoint", help="Path to a *.ckpt file")
     parser.add_argument("num_images", type=int, help="How many images should be generated?")
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--output_type", default="raw", help="In which format to save new data?")
     parser.add_argument("--seed", type=int, default=1234)
     args = parser.parse_args()
@@ -38,25 +38,29 @@ if __name__ == "__main__":
     n_images = 0
     pbar = tqdm(desc="Generating images...", total=args.num_images)
     while n_images < args.num_images:
-        gc.collect()
-        torch.cuda.empty_cache()
-
         batch_size = min(args.num_images - n_images, args.batch_size)
-        print(batch_size)
-        images: Union[Image.Image, Tensor] = model.generate_new_images(batch_size, generator, args.output_type)
+
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            images: Union[Image.Image, Tensor] = model.generate_new_images(
+                batch_size, generator, args.output_type
+            )
     
         if args.output_type == "pil":
             ext = "png"
         elif args.output_type == "raw":
             # Bx1xHxW to BxHxW
-            images = images.cpu().numpy()
+            images = images.to(device="cpu", dtype=torch.float32).numpy()  # Bx1xHxW
             images = [Image.fromarray(img[0, :, :]) for img in images]
             ext = "TIF"
         else:
             raise ValueError(f"Unknown: {args.output_type=}")
-
+        
         for idx, image in enumerate(images):
             image.save(save_dir / f"{n_images + idx:07d}.{ext}")
+
+        # gc.collect()
+        # torch.cuda.empty_cache()
+        # torch.cuda.synchronize()
         
         pbar.update(n=batch_size)
         n_images += batch_size
