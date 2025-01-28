@@ -38,6 +38,7 @@ from ..vqvae.train import load_ae_from_checkpoint, AutoEncoderType
 class TrainConfig:
     logdir: Optional[str] = None
     vqvae_checkpoint: Optional[str] = None
+    block_out_channels: list[int] = field(default_factory=lambda: [128, 128, 256, 256, 512])
     train_batch_size: int = 16
     eval_batch_size: int = 128
     learning_rate: float = 1e-4
@@ -61,7 +62,7 @@ class TrainConfig:
     snr_gamma: float = 5.0
     data: DataConfig = field(default_factory=DataConfig)
     fast_dev_run: bool = False
-
+    
     def __post_init__(self):
         if self.num_workers == -1:
             self.num_workers = cpu_count()
@@ -83,27 +84,17 @@ class LDM(LightningModule):
         self.vqvae: VQModel = load_ae_from_checkpoint(config.vqvae_checkpoint)
         stride = 2**(len(self.vqvae.encoder.down_blocks) - 1)
         latent_dim: int = self.vqvae.config.vq_embed_dim
-    
+
+        config.block_out_channels = [128, 128, 256, 256, 512]  # TODO
+        n_unet_blocks = len(config.block_out_channels)
         self.unet = UNet2DModel(
             sample_size=int(config.data.image_size / stride),
             in_channels=latent_dim,
             out_channels=latent_dim,
             layers_per_block=2,
-            block_out_channels=(128, 128, 256, 256, 512),
-            down_block_types=(
-                "DownBlock2D",
-                "DownBlock2D",
-                "DownBlock2D",
-                "DownBlock2D",
-                "DownBlock2D",
-            ),
-            up_block_types=(
-                "UpBlock2D",
-                "UpBlock2D",
-                "UpBlock2D",
-                "UpBlock2D",
-                "UpBlock2D",
-            ),
+            block_out_channels=config.block_out_channels,
+            down_block_types=tuple("DownBlock2D" for _ in range(n_unet_blocks)),
+            up_block_types=tuple("UpBlock2D" for _ in range(n_unet_blocks)),
         )
         
         self.noise_scheduler = DDIMScheduler(
@@ -393,6 +384,26 @@ class EMACallbackUNet(Callback):
 
         # copy EMA parameters to UNet model
         self.ema.copy_to(pl_module.unet.parameters())
+
+
+def load_shadow_params(checkpoint: str):
+    ckpt = torch.load(checkpoint, weights_only=False)
+    shadow_params = ckpt["state_dict_ema"]["shadow_params"]
+    return shadow_params
+
+
+def copy_to(shadow_params, parameters):
+    # shadow_params --> parameters
+    for s_param, param in zip(shadow_params, parameters):
+        param.data.copy_(s_param.to(param.device).data)
+
+
+def load_ldm_from_checkpoint(ckpt: str, use_ema_weights: bool = True) -> LDM:
+    model = LDM.load_from_checkpoint(ckpt)
+    if use_ema_weights:
+        shadow_params = load_shadow_params(ckpt)
+        copy_to(shadow_params, model.unet.parameters())
+    return model
 
 
 def main():

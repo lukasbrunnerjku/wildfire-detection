@@ -57,7 +57,15 @@ tensorboard --logdir="/mnt/data/wildfire/runs"
 Augment the thermal images by simulating new a environment temperature with
 
 ```
-python -m src.augmentation 
+python -m src.scripts.augmentation path/to/tif/images path/to/save/targets --newdatadir path/to/augmented/tif/images
+```
+
+When targets of existing tif images should be generated run the above command without: --newdatadir path/to/augmented/tif/images
+
+Example:
+
+```
+python -m src.scripts.augmentation /mnt/data/wildfire/imgs1 /mnt/data/wildfire/targets --newdatadir /mnt/data/wildfire/new_imgs1 --amb_temp 9 --max_sun_temp_inc 15 --new_amb_temp 20 --max_amb_temp 30 --upper_fire_thres_temp 60
 ```
 
 Train the LDM with
@@ -72,7 +80,21 @@ Example:
 python -m src.ldm.train vqvae_checkpoint=/mnt/data/wildfire/runs/VQVAE/version_4/checkpoints/step=39500-fid_score=4.704.ckpt data.folder=/mnt/data/wildfire/imgs1 data.mean=2.7935 data.std=5.9023 logdir=/mnt/data/wildfire/runs
 ```
 
-## Running FID Analytics
+Generating novel images with the LDM with
+
+```
+python -m src.scripts.generate path/to/save/new/images path/to/ldm.ckpt num_of_images --batch_size 512
+```
+
+Select highest batch size that fits in memory to speed up generation process.
+
+Example:
+
+```
+python -m src.scripts.generate /mnt/data/wildfire/generated /mnt/data/wildfire/runs/LDM/version_0/checkpoints/step=19500-fid_score=8.802.ckpt 100 --batch_size 32
+```
+
+## Running Analytics and Visualizations
 
 What FID values to expect taking the ground truth as lower bound
 
