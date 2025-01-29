@@ -41,9 +41,10 @@ class TrainConfig:
     block_out_channels: list[int] = field(default_factory=lambda: [64, 128, 256, 512])
     train_batch_size: int = 16
     eval_batch_size: int = 128
+    num_train_timesteps: int = 1000
     learning_rate: float = 1e-4
     min_learning_rate: float = 1e-5
-    weight_decay: float = 1e-4
+    weight_decay: float = 0.0
     beta1: float = 0.9
     beta2: float = 0.99
     warmup_steps: int = 500
@@ -97,7 +98,7 @@ class LDM(LightningModule):
         )
         
         self.noise_scheduler = DDIMScheduler(
-            num_train_timesteps=1000,
+            num_train_timesteps=config.num_train_timesteps,
             beta_start=0.00085,
             beta_end=0.012,
             beta_schedule="scaled_linear",

@@ -101,3 +101,15 @@ What FID values to expect taking the ground truth as lower bound
 ```
 python -m src.utils.fid
 ```
+
+Visualize the effect of temperature augmentation with
+
+```
+python -m src.scripts.make_gif /mnt/data/wildfire/misc /mnt/data/wildfire/imgs1/DJI_20231017140640_0267_T.TIF 0 30
+```
+
+Make tone mapped image from *.TIF files with
+
+```
+python -m src.scripts.tonemap /mnt/data/wildfire/new_imgs1 /mnt/data/wildfire/tonemapped
+```
