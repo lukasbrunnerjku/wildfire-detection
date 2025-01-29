@@ -407,8 +407,9 @@ def load_ldm_from_checkpoint(ckpt: str, use_ema_weights: bool = True) -> LDM:
 
 def main():
     conf = OmegaConf.structured(TrainConfig())
+    file = OmegaConf.load("src/configs/ldm.yaml")
     args = OmegaConf.from_cli()
-    conf = OmegaConf.merge(conf, args)
+    conf = OmegaConf.merge(conf, file, args)
 
     assert conf.vqvae_checkpoint is not None
     assert conf.logdir is not None
