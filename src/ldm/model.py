@@ -426,7 +426,7 @@ class LDMPipeline(DiffusionPipeline):
         latents = latents * self.unet.latent_std + self.unet.latent_mean
 
         # decode the image latents with the VAE
-        image = self.vqvae.decode(latents).sample
+        image = self.vqvae.decode(latents)["sample"]
 
         # we predict normalize temperature values, thus denormalize first
         image = denormalize_tif(image, image_mean, image_std)  # Bx1xHxW

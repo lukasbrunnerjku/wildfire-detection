@@ -24,11 +24,41 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--output_type", default="raw", help="In which format to save new data?")
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument("--trace", action="store_true")
     args = parser.parse_args()
 
     set_torch_options()
 
-    model: LDM = load_ldm_from_checkpoint(args.ldm_checkpoint)
+    model: LDM = load_ldm_from_checkpoint(args.ldm_checkpoint).eval()
+    model.requires_grad_(False)
+
+    latent_dim = model.vqvae.config.vq_embed_dim
+    device = next(iter(model.parameters())).device
+    latent_size = model.unet.sample_size
+
+    if args.trace:  # Optimize inference?
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            scripted_model = torch.jit.trace_module(
+                model.vqvae,
+                inputs={"decode": torch.randn(1, latent_dim, latent_size, latent_size, device=device)},
+                strict=False,
+            )
+            scripted_model = torch.jit.optimize_for_inference(scripted_model, ["decode"])
+            model.vqvae = scripted_model
+
+        with torch.autocast(device_type="cuda", dtype=torch.float16):
+            scripted_model = torch.jit.trace_module(
+                model.unet,
+                inputs={
+                    "forward": (
+                        torch.randn(1, latent_dim, latent_size, latent_size, device=device),
+                        torch.tensor([1.0], dtype=torch.long, device=device),
+                    )
+                },
+                strict=False,
+            )
+            scripted_model = torch.jit.optimize_for_inference(scripted_model, ["forward"])
+            model.unet = scripted_model
     
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)

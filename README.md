@@ -91,7 +91,7 @@ Select highest batch size that fits in memory to speed up generation process.
 Example:
 
 ```
-python -m src.scripts.generate /mnt/data/wildfire/generated /mnt/data/wildfire/runs/LDM/version_0/checkpoints/step=19500-fid_score=8.802.ckpt 100 --batch_size 32
+python -m src.scripts.generate /mnt/data/wildfire/generated /mnt/data/wildfire/runs/LDM/version_4/checkpoints/step=12500-fid_score=8.807.ckpt 100 --batch_size 32
 ```
 
 ## Running Analytics and Visualizations
