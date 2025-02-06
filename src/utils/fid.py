@@ -10,6 +10,11 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from torchvision import transforms
+
+from .image import TemperatureData
 
 
 class _NoTrainInceptionV3(_FeatureExtractorInceptionV3):
@@ -259,32 +264,32 @@ def test_mock():
     print(f"Mock: {fid_score=}")
 
 
+def load_images(image_folder: str, image_size: int, num_samples: int) -> list[Tensor]:
+    ds = TemperatureData(image_folder)
+    dl = DataLoader(ds, batch_size=1, num_workers=32, drop_last=False, shuffle=True)
+    crop_fn = transforms.CenterCrop(image_size)
+    
+    images = []
+    for i, batch in enumerate(tqdm(dl, desc="Processing batches...")):
+        images.append(crop_fn(batch))  # BxHxW
+        if i >= (num_samples - 1):
+            break
+    return images
+
+
 @torch.no_grad()
 def test_real(
-    image_foder: str,
+    image_folder: str,
     image_mean: float,
     image_std: float,
     image_size: int = 512,
     num_samples: int = 512,
     batch_size: int = 128,
 ):
-    from torch.utils.data import DataLoader
-    from tqdm import tqdm
-    from torchvision import transforms
     from torchmetrics.image.fid import FrechetInceptionDistance
+    from .image import normalize_tif, tone_mapping
 
-    from .image import normalize_tif, TemperatureData, tone_mapping
-
-    ds = TemperatureData(image_foder)
-    dl = DataLoader(ds, batch_size=1, num_workers=32, drop_last=False, shuffle=True)
-
-    crop_fn = transforms.CenterCrop(image_size)
-
-    images = []
-    for i, batch in enumerate(tqdm(dl, desc="Processing batches...")):
-        images.append(crop_fn(batch))  # BxHxW
-        if i >= (num_samples - 1):
-            break
+    images = load_images(image_folder, image_size, num_samples)
 
     # gFID
     x = torch.concat(
@@ -330,7 +335,7 @@ def test_real(
         fid.update(x[i:i+batch_size].cuda(), real=True)
         fid.update(y[i:i+batch_size].cuda(), real=False)
     fid_score = fid.compute().cpu()
-    print(f"Without normalization: {fid_score=}")
+    print(f"Without normalization: {fid_score=}")  # Recommended to use this!
 
 
 def build_fid_metric(
@@ -352,6 +357,33 @@ def build_fid_metric(
     return fid
 
 
+@torch.no_grad()
+def fid_score_comparing_image_folders(
+    image_folder1: str,
+    image_folder2: str,
+    image_size: int = 512,
+    num_samples: int = 512,
+    batch_size: int = 128,
+):
+    images1 = load_images(image_folder1, image_size, num_samples)
+    images2 = load_images(image_folder2, image_size, num_samples)
+    
+    x1 = images1.reshape(
+        num_samples, 1, image_size, image_size
+    ).repeat(1, 3, 1, 1)  # Bx3xHxW
+
+    x2 = images2.reshape(
+        num_samples, 1, image_size, image_size
+    ).repeat(1, 3, 1, 1)  # Bx3xHxW
+
+    fid: FID = build_fid_metric(image_size).cuda()
+    for i in range(0, len(x1), batch_size):
+        fid.update(x1[i:i+batch_size].cuda(), real=True)
+        fid.update(x2[i:i+batch_size].cuda(), real=False)
+    fid_score = fid.compute().cpu()
+    print(f"{fid_score=}")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -359,7 +391,14 @@ if __name__ == "__main__":
     parser.add_argument("--image_folder", default="/mnt/data/wildfire/imgs1")
     parser.add_argument("--image_mean", type=float, default=2.7935)
     parser.add_argument("--image_std", type=float, default=5.9023)
+    parser.add_argument("--image_folder2", default=None)
     args = parser.parse_args()
 
-    test_mock()
-    test_real(args.image_folder, args.image_mean, args.image_std)
+    # NOTE: FID computation is batch size dependent, thus for fair comparison between
+    # training runs DO NOT change the evaluation batch size!
+
+    if args.image_folder2 is None:  # Test the code for debugging.
+        test_mock()
+        test_real(args.image_folder, args.image_mean, args.image_std)
+    else:
+        fid_score_comparing_image_folders(args.image_folder, args.image_folder2)

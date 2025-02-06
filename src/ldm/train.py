@@ -85,10 +85,12 @@ class LDM(LightningModule):
         self.vqvae: VQModel = load_ae_from_checkpoint(config.vqvae_checkpoint)
         stride = 2**(len(self.vqvae.encoder.down_blocks) - 1)
         latent_dim: int = self.vqvae.config.vq_embed_dim
-
+        sample_size = int(config.data.image_size / stride)
+        print(f"UNet latent space: 1x{latent_dim}x{sample_size}x{sample_size}")
+        
         n_unet_blocks = len(config.block_out_channels)
         self.unet = UNet2DModel(
-            sample_size=int(config.data.image_size / stride),
+            sample_size=sample_size,
             in_channels=latent_dim,
             out_channels=latent_dim,
             layers_per_block=2,

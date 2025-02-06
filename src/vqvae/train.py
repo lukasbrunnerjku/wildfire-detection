@@ -52,10 +52,12 @@ class AutoEncoderType(Enum):
 class TrainConfig:
     logdir: Optional[str] = None
     ae_type: AutoEncoderType = AutoEncoderType.VQModel
+    block_out_channels: list[int] = field(default_factory=lambda: [64, 128, 256])
     quantizer_type: QuantizerType = QuantizerType.LFQ
     codebook_size: CodebookSize = CodebookSize.MEDIUM
     # Some quantizers ignore latent_dim, calculating it from the codebook_size.
     latent_dim: int = 3
+    accumulate_grad_batches: int = 1
     train_batch_size: int = 16
     eval_batch_size: int = 128
     learning_rate: float = 1e-4
@@ -102,24 +104,18 @@ class VQVAE(LightningModule):
     def __init__(self, config=None):
         super().__init__()
 
+        n_ae_blocks = len(config.block_out_channels)
+
         if config.ae_type == AutoEncoderType.AutoencoderKL:
             self.ae = AutoencoderKL(
                 in_channels=1,
                 out_channels=1,
                 latent_channels=config.latent_dim,
                 sample_size=config.data.image_size,
-                block_out_channels=(64, 128, 256),
+                block_out_channels=config.block_out_channels,
                 mid_block_add_attention=False,
-                down_block_types=(
-                    "DownEncoderBlock2D",
-                    "DownEncoderBlock2D",
-                    "DownEncoderBlock2D",
-                ),
-                up_block_types=(
-                    "UpDecoderBlock2D",
-                    "UpDecoderBlock2D",
-                    "UpDecoderBlock2D",
-                ),
+                down_block_types=tuple("DownEncoderBlock2D" for _ in range(n_ae_blocks)),
+                up_block_types=tuple("UpDecoderBlock2D" for _ in range(n_ae_blocks)),
             )
         elif config.ae_type == AutoEncoderType.VQModel:
             base_two_exponent = int(math.log2(config.codebook_size.value))
@@ -139,18 +135,10 @@ class VQVAE(LightningModule):
                 num_vq_embeddings=self.codebook_size,
                 vq_embed_dim=config.latent_dim,
                 latent_channels=config.latent_dim,
-                block_out_channels=(64, 128, 256),
+                block_out_channels=config.block_out_channels,
                 mid_block_add_attention=False,
-                down_block_types=(
-                    "DownEncoderBlock2D",
-                    "DownEncoderBlock2D",
-                    "DownEncoderBlock2D",
-                ),
-                up_block_types=(
-                    "UpDecoderBlock2D",
-                    "UpDecoderBlock2D",
-                    "UpDecoderBlock2D",
-                ),
+                down_block_types=tuple("DownEncoderBlock2D" for _ in range(n_ae_blocks)),
+                up_block_types=tuple("UpDecoderBlock2D" for _ in range(n_ae_blocks)),
             )
             self.ae.quantize = quantize
         
@@ -219,6 +207,7 @@ class VQVAE(LightningModule):
         
         self.automatic_optimization = False
         self.manual_global_step = 0
+        self.accumulate_step = 0
 
         if self.config.adv.start_step >= 0:
             decay, no_decay = weight_decay_parameter_split(self.adversarial_loss)
@@ -272,20 +261,21 @@ class VQVAE(LightningModule):
             kl_loss = posterior.kl().mean()
 
         if self.manual_global_step % self.config.vis_every_n_steps == 0:
-            if self.global_rank == 0:
-                subset_x = denormalize_tif(x[:4].cpu(), self.config.data.mean, self.config.data.std)
-                subset_x_hat = denormalize_tif(x_hat[:4].detach().cpu(), self.config.data.mean, self.config.data.std)
-                imgs = (
-                    [tone_mapping(img, img.min(), img.max()) for img in subset_x] +
-                    [tone_mapping(img, img.min(), img.max()) for img in subset_x_hat]
-                )
-                grid: Image.Image = pil_make_grid(imgs, ncol=4)
-                self.logger.experiment.add_image(
-                    "sample_reconstruction",
-                    np.asarray(grid),
-                    self.manual_global_step,
-                    dataformats="HWC",
-                )
+            if (self.accumulate_step + 1) % self.config.accumulate_grad_batches == 0:
+                if self.global_rank == 0:
+                    subset_x = denormalize_tif(x[:4].cpu(), self.config.data.mean, self.config.data.std)
+                    subset_x_hat = denormalize_tif(x_hat[:4].detach().cpu(), self.config.data.mean, self.config.data.std)
+                    imgs = (
+                        [tone_mapping(img, img.min(), img.max()) for img in subset_x] +
+                        [tone_mapping(img, img.min(), img.max()) for img in subset_x_hat]
+                    )
+                    grid: Image.Image = pil_make_grid(imgs, ncol=4)
+                    self.logger.experiment.add_image(
+                        "sample_reconstruction",
+                        np.asarray(grid),
+                        self.manual_global_step,
+                        dataformats="HWC",
+                    )
 
         perc_loss = self.perceptual_loss(x, x_hat)
         l1_loss = F.l1_loss(x, x_hat, reduction="mean")
@@ -301,6 +291,7 @@ class VQVAE(LightningModule):
         else:
             loss = loss + self.config.kl_weight * kl_loss
 
+        self.config.accumulate_grad_batches
         if self.config.adv.start_step >= 0:
             ae_opt, disc_opt = self.optimizers()
 
@@ -315,8 +306,9 @@ class VQVAE(LightningModule):
                 self.ae.decoder.conv_out.weight,
             )
             loss = loss + g_weight * g_loss
-            self.manual_backward(loss)
-            ae_opt.step()
+            self.manual_backward(loss / self.config.accumulate_grad_batches)
+            if (self.accumulate_step + 1) % self.config.accumulate_grad_batches == 0:
+                ae_opt.step()
             
             loss, d_loss, lecam_penalty = self.adversarial_loss.forward_discriminator(
                 x, x_hat, self.manual_global_step, True,
@@ -324,8 +316,9 @@ class VQVAE(LightningModule):
 
             if loss is not None:  # Depends on "config.adv.start_step"
                 disc_opt.zero_grad()
-                self.manual_backward(loss)
-                disc_opt.step()
+                self.manual_backward(loss / self.config.accumulate_grad_batches)
+                if (self.accumulate_step + 1) % self.config.accumulate_grad_batches == 0:
+                    disc_opt.step()
 
             if isinstance(self.ae, VQModel):
                 self.log("vqvae_commit_loss", commit_loss.detach().cpu().item())
@@ -341,15 +334,18 @@ class VQVAE(LightningModule):
             self.log("vqvae_adv_logits_real", self.adversarial_loss.last_logits_real.cpu().item())
             self.log("vqvae_adv_logits_fake", self.adversarial_loss.last_logits_fake.cpu().item())
 
-            ae_sc, disc_sc = self.lr_schedulers()
-            ae_sc.step()
-            disc_sc.step()
+            if (self.accumulate_step + 1) % self.config.accumulate_grad_batches == 0:
+                ae_sc, disc_sc = self.lr_schedulers()
+                ae_sc.step()
+                disc_sc.step()
 
         else:
             ae_opt = self.optimizers()
             ae_opt.zero_grad()
-            self.manual_backward(loss)
-            ae_opt.step()
+            self.manual_backward(loss / self.config.accumulate_grad_batches)
+            
+            if (self.accumulate_step + 1) % self.config.accumulate_grad_batches == 0:
+                ae_opt.step()
 
             if isinstance(self.ae, VQModel):
                 self.log("vqvae_commit_loss", commit_loss.detach().cpu().item())
@@ -360,10 +356,15 @@ class VQVAE(LightningModule):
             self.log("vqvae_l1_loss", l1_loss.detach().cpu().item())
             self.log("vqvae_l2_loss", l2_loss.detach().cpu().item())
 
-            ae_sc = self.lr_schedulers()
-            ae_sc.step()
+            if (self.accumulate_step + 1) % self.config.accumulate_grad_batches == 0:
+                ae_sc = self.lr_schedulers()
+                ae_sc.step()
         
-        self.manual_global_step += 1
+        if (self.accumulate_step + 1) % self.config.accumulate_grad_batches == 0:
+            self.manual_global_step += 1
+            self.accumulate_step = 0
+        else:
+            self.accumulate_step += 1
 
     def on_validation_epoch_start(self):
         gc.collect()
@@ -479,8 +480,9 @@ def load_ae_from_checkpoint(ckpt: str):
 
 def main():
     conf = OmegaConf.structured(TrainConfig())
+    file = OmegaConf.load("src/configs/vqvae.yaml")
     args = OmegaConf.from_cli()
-    conf = OmegaConf.merge(conf, args)
+    conf = OmegaConf.merge(conf, file, args)
 
     assert conf.logdir is not None
     assert conf.data.folder is not None
@@ -515,10 +517,13 @@ def main():
             update_after_step=conf.ema_update_after_step,
         ))
 
-    max_steps = (conf.warmup_steps + conf.train_steps)
+    max_steps = (conf.warmup_steps + conf.train_steps) * conf.accumulate_grad_batches
 
     if conf.adv.start_step >= 0:
         max_steps *= 2
+
+    log_every_n_steps = conf.log_every_n_steps * conf.accumulate_grad_batches
+    val_every_n_steps = conf.val_every_n_steps * conf.accumulate_grad_batches
 
     trainer = Trainer(
         fast_dev_run=4 * int(conf.fast_dev_run),
@@ -526,9 +531,9 @@ def main():
         devices="0,",
         strategy="auto",
         num_nodes=1,
-        log_every_n_steps=conf.log_every_n_steps,
+        log_every_n_steps=log_every_n_steps,
         max_steps=max_steps,
-        val_check_interval=conf.val_every_n_steps,
+        val_check_interval=val_every_n_steps,
         precision="16-mixed",
         logger=TensorBoardLogger(
             conf.logdir,
