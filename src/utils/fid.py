@@ -368,11 +368,11 @@ def fid_score_comparing_image_folders(
     images1 = load_images(image_folder1, image_size, num_samples)
     images2 = load_images(image_folder2, image_size, num_samples)
     
-    x1 = images1.reshape(
+    x1 = torch.concat(images1, dim=0).reshape(
         num_samples, 1, image_size, image_size
     ).repeat(1, 3, 1, 1)  # Bx3xHxW
 
-    x2 = images2.reshape(
+    x2 = torch.concat(images2, dim=0).reshape(
         num_samples, 1, image_size, image_size
     ).repeat(1, 3, 1, 1)  # Bx3xHxW
 
