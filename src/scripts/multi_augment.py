@@ -1,8 +1,11 @@
-import multiprocessing as mp
-import subprocess
+import torch.multiprocessing as mp
 from pathlib import Path
 from omegaconf import OmegaConf
 from dataclasses import dataclass
+from tqdm import tqdm
+
+from .augmentation import build_dataset, process_dataset
+from ..utils.image import build_subset_datasets
 
 
 @dataclass
@@ -16,6 +19,9 @@ class Conf():
     amb_temp: float = 9.0
     max_sun_temp_inc: float = 15.0
     upper_fire_thres_temp: float = 60.0
+    max_amb_temp: float = 30.0
+    max_amb_temp_inc: float = 5.0
+    num_workers: int = 4
 
 
 def parse_args():
@@ -25,44 +31,43 @@ def parse_args():
     return conf
 
 
-def run_script(script_name: str, args: list[str]):
-    """Run a script with given arguments in a separate process."""
-    cmd = ["python -m", script_name] + args  # Build command
-    process = subprocess.Popen(cmd)  # Start process
-    process.wait()  # Wait for completion
-
-
 if __name__ == "__main__":
+    # NOTE: AttributeError: 'NoneType' object has no attribute 'dumps' <-- ignore this, seems to work fine!
     conf = parse_args()
     print(conf)
 
-    ts = [t for t in range(conf.start_amb_temp, conf.stop_amb_temp, conf.step_amb_temp)]
-        
-    # conf.amb_temp
-    # conf.max_sun_temp_inc
-    # conf.upper_fire_thres_temp
+    amb_temps = [t for t in range(conf.start_amb_temp, conf.stop_amb_temp, conf.step_amb_temp)]
 
-    # imagedir = conf.imagedirs.format(new_amb_temp)
-    # targetdir = conf.targetdirs.format(new_amb_temp)
+    dataset = build_dataset(Path(conf.datadir))
 
-# # Define scripts and their respective command-line arguments
-# scripts = [
-#     ("script1.py", ["arg1", "arg2"]),
-#     ("script2.py", ["argA", "argB"]),
-#     ("script3.py", ["123", "456"]),
-# ]
+    num_total_samples = len(dataset)
+    samples_per_subset = int(num_total_samples / len(amb_temps))
+    assert num_total_samples % len(amb_temps) == 0
 
+    datasets = build_subset_datasets(dataset, samples_per_subset)
 
+    pool = mp.Pool(processes=conf.num_workers)
 
-# if __name__ == "__main__":
-#     processes = []
+    pbar = tqdm(desc="Processing images...", total=num_total_samples)
 
-#     for script, args in scripts:
-#         p = multiprocessing.Process(target=run_script, args=(script, args))
-#         p.start()
-#         processes.append(p)
+    def progress_callback(num_images_processed: int):
+        pbar.update(num_images_processed)
+    
+    for idx, new_amb_temp in enumerate(amb_temps):
+        newdatadir = Path(conf.imagedirs.format(new_amb_temp))
+        targetdir = Path(conf.targetdirs.format(new_amb_temp))
 
-#     for p in processes:
-#         p.join()  # Wait for all processes to finish
+        # Heuristic, biomass can have a max. temp. of ie. 30, but if ie. the new amb. temp.
+        # is already 30 degrees we can easily imagine that biomass could be a bit hotter than that.
+        # Set the allowed max. amb. temp. to ie. 5 degrees hotter for high new amb. temp. settings.
+        max_amb_temp = max(new_amb_temp + conf.max_amb_temp_inc, conf.max_amb_temp)  
 
-#     print("All scripts have finished execution.")
+        args = (
+            datasets[idx], 0, newdatadir, targetdir,
+            conf.amb_temp, conf.max_sun_temp_inc,
+            new_amb_temp, max_amb_temp,
+            conf.upper_fire_thres_temp,
+            False,
+        )
+        pool.apply_async(process_dataset, args, callback=progress_callback).get()
+    

@@ -7,3 +7,6 @@ stop_amb_temp: 35
 amb_temp: 9.0
 max_sun_temp_inc: 15.0
 upper_fire_thres_temp: 60.0
+max_amb_temp: 30.0
+max_amb_temp_inc: 5.0
+num_workers: 4

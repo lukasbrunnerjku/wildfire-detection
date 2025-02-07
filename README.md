@@ -89,13 +89,14 @@ OMP_NUM_THREADS=16 torchrun --nproc-per-node 4 -m src.scripts.generate /mnt/data
 
 We assign each of the 4 GPUs 16 CPUs and generate 3500 images using a batch size of 32 per GPU to run the inference code. The output is saved to /mnt/data/wildfire/synthetic/generated, in a next step we can produce images with different environment temperatures by a heuristic augmentation strategy. With a batch size of 16 the GPU memory consumption is already a bit over 24 Gigabyte on the GPU with rank 0 (18 Gigabyte on the others).
 
-Augmenting the generated images automatically for a range of specified ambient temperatures can be done with
+Augmenting the generated images automatically for a range of specified ambient temperatures, this can be done with
 
 ```
 python -m src.scripts.multi_augment
 ```
 
-
+Under src/configs/multi_augment.yaml you can find the configuration
+possibilities of the augmentation strategy.
 
 ## Running Analytics and Visualizations
 

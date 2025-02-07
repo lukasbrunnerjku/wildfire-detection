@@ -1,4 +1,4 @@
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Subset
 from PIL import Image, ImageDraw, ImageFont
 from torch import Tensor
 import torch
@@ -39,7 +39,7 @@ def tif_to_np(file: Union[str, Path]) -> np.ndarray:
 class BaseDataset(Dataset):
 
     def __init__(self, folder: str, pattern = "*.TIF"):
-        self.files = list(Path(folder).glob(pattern))
+        self.files = sorted(Path(folder).glob(pattern))
 
     def __len__(self):
         return len(self.files)
@@ -63,6 +63,18 @@ class TemperatureDataWithIndices(BaseDataset):
         file = self.files[idx]
         image = self.read_from_file(file)
         return image, idx
+    
+
+def build_subset_datasets(dataset: BaseDataset, samples_per_subset: int):
+    num_total_samples = len(dataset)
+    indices = torch.arange(0, num_total_samples)
+
+    datasets = []
+    for i in range(0, num_total_samples, samples_per_subset):
+        datasets.append(Subset(
+            dataset, indices[i:i+samples_per_subset]
+        ))
+    return datasets
 
 
 def to_zero_one_range(

@@ -1,6 +1,6 @@
 import torch
 from torch import Tensor
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 from pathlib import Path
 from PIL import Image
@@ -55,8 +55,16 @@ def amb_temp_aug(
     return new_img
 
 
-def main(
+def build_dataset(
     datadir: Path,
+) -> TemperatureDataWithIndices:
+    assert datadir.exists() and datadir.is_dir(), f"{datadir} does not exist or is not a directory."
+    return TemperatureDataWithIndices(folder=datadir)
+
+
+def process_dataset(
+    ds: Union[TemperatureDataWithIndices, Subset],
+    num_workers: int,
     newdatadir: Union[Path, None],
     targetdir: Path,
     amb_temp: float,
@@ -64,28 +72,31 @@ def main(
     new_amb_temp: float,
     max_amb_temp: float,
     upper_fire_thres_temp: float,
-):
-    assert datadir.exists() and datadir.is_dir(), f"{datadir} does not exist or is not a directory."
-    targetdir.mkdir(parents=True, exist_ok=True)
+    show_progess: bool,
+) -> int:
+    num_images_processed = 0
 
+    targetdir.mkdir(parents=True, exist_ok=False)
     if newdatadir is not None:
-        newdatadir.mkdir(parents=True, exist_ok=True)
-        if len(list(newdatadir.glob("*.TIF"))) > 0:
-            raise RuntimeError(
-                f"{datadir} is expected to be empty, please delete files or change directory."
-            )
+        newdatadir.mkdir(parents=True, exist_ok=False)
 
-    if len(list(targetdir.glob("*.png"))) > 0:
-        raise RuntimeError(
-            f"{targetdir} is expected to be empty, please delete files or change directory."
-        )
+    dl = DataLoader(
+        ds, batch_size=1, num_workers=num_workers, drop_last=False
+    )
 
-    ds = TemperatureDataWithIndices(folder=args.datadir)
-    dl = DataLoader(ds, batch_size=16, num_workers=4, drop_last=False)
+    if isinstance(ds, Subset):
+        files = ds.dataset.files
+    else:
+        files = ds.files
 
-    for imgs, inds in tqdm(dl, desc="Generating new images and targets..."):
+    if show_progess:
+        pbar = tqdm(dl, desc="Processing images...")
+    else:
+        pbar = dl
+
+    for imgs, inds in pbar:
         for img, idx in zip(imgs, inds):  # HxW
-            img_fp: Path = ds.files[int(idx)]
+            img_fp: Path = files[int(idx)]
 
             if newdatadir is None:
                 fire_thres_temp = amb_temp + max_sun_temp_inc
@@ -113,6 +124,10 @@ def main(
                     new_img, new_fire_thres_temp, upper_fire_thres_temp
                 )
                 Image.fromarray(tgt.cpu().numpy()).save(tgt_fp)
+        
+            num_images_processed += 1
+
+    return num_images_processed
 
 
 if __name__ == "__main__":
@@ -127,10 +142,14 @@ if __name__ == "__main__":
     parser.add_argument("--new_amb_temp", type=float, default=20, help="The new ambient temp. to simulate new data")
     parser.add_argument("--max_amb_temp", type=float, default=30, help="Clip increase by new ambient temp. here")
     parser.add_argument("--upper_fire_thres_temp", type=float, default=60, help="Above this temp. it is fire for sure")
+    parser.add_argument("--num_workers", type=int, default=4)
     args = parser.parse_args()
     
-    main(
-        args.datadir,
+    ds = build_dataset(args.datadir, args.newdatadir, args.targetdir)
+    
+    process_dataset(
+        ds,
+        args.num_workers,
         args.newdatadir,
         args.targetdir,
         args.amb_temp,
@@ -138,4 +157,5 @@ if __name__ == "__main__":
         args.new_amb_temp,
         args.max_amb_temp,
         args.upper_fire_thres_temp,
+        show_progess=True,
     )
