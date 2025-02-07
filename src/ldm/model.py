@@ -374,6 +374,7 @@ class LDMPipeline(DiffusionPipeline):
         num_inference_steps: int = 50,
         output_type: Optional[str] = "pil",  # pil, np, raw
         return_dict: bool = True,
+        show_progress: bool = True,
         **kwargs,
     ) -> Union[Tuple, ImagePipelineOutput]:
         r"""
@@ -415,7 +416,12 @@ class LDMPipeline(DiffusionPipeline):
         if accepts_eta:
             extra_kwargs["eta"] = eta
 
-        for t in self.progress_bar(self.scheduler.timesteps):
+        if show_progress:
+            timesteps = self.progress_bar(self.scheduler.timesteps)
+        else:
+            timesteps = self.scheduler.timesteps
+
+        for t in timesteps:
             latent_model_input = self.scheduler.scale_model_input(latents, t)
             # predict the noise residual
             noise_prediction = self.unet(latent_model_input, t).sample

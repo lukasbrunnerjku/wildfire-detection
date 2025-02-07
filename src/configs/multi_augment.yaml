@@ -1,0 +1,9 @@
+datadir: "/mnt/data/wildfire/synthetic/generated"
+imagedirs: /mnt/data/wildfire/synthetic/images/{:02d}_amb_temp
+targetdirs: /mnt/data/wildfire/synthetic/targets/{:02d}_amb_temp
+start_amb_temp: 0
+step_amb_temp: 1
+stop_amb_temp: 35
+amb_temp: 9.0
+max_sun_temp_inc: 15.0
+upper_fire_thres_temp: 60.0

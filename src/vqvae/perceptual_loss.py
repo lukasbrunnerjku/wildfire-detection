@@ -51,11 +51,11 @@ class PerceptualLoss(nn.Module):
         # -> L2 loss on logits of pretrained ResNet50 of original and
         # reconstructed images
         if resnet_type == "resnet50":
-            full_resnet = models.resnet50(models.ResNet50_Weights.DEFAULT)
+            full_resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
         elif resnet_type == "resnet18":
-            full_resnet = models.resnet18(models.ResNet18_Weights.DEFAULT)
+            full_resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
         elif resnet_type == "resnet34":
-            full_resnet = models.resnet34(models.ResNet34_Weights.DEFAULT)
+            full_resnet = models.resnet34(weights=models.ResNet34_Weights.DEFAULT)
         else:
             raise ValueError(f"Cannot handle specified resnet_type: {resnet_type}")
         

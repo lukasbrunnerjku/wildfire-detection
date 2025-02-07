@@ -193,6 +193,7 @@ class LDM(LightningModule):
         batch_size: int = 9,
         generator: Optional[torch.Generator] = None,
         output_type: str = "pil",
+        show_progress: bool = True,
     ) -> list[Image.Image]:
         # Sample some images from random noise (this is the backward diffusion process).
         images: list[Image.Image] = self.pipeline(
@@ -201,6 +202,7 @@ class LDM(LightningModule):
             batch_size=batch_size,
             generator=generator,
             output_type=output_type,
+            show_progress=show_progress,
         ).images
         return images
 
@@ -400,8 +402,12 @@ def copy_to(shadow_params, parameters):
         param.data.copy_(s_param.to(param.device).data)
 
 
-def load_ldm_from_checkpoint(ckpt: str, use_ema_weights: bool = True) -> LDM:
-    model = LDM.load_from_checkpoint(ckpt)
+def load_ldm_from_checkpoint(
+    ckpt: str,
+    use_ema_weights: bool = True,
+    map_location=None,  # ie. map_location = {'cuda:1':'cuda:0'}
+) -> LDM:
+    model = LDM.load_from_checkpoint(ckpt, map_location=map_location)
     if use_ema_weights:
         shadow_params = load_shadow_params(ckpt)
         copy_to(shadow_params, model.unet.parameters())

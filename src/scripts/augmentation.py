@@ -13,16 +13,23 @@ def build_semantic_segmentation_target(
     img: Tensor,  # HxW
     fire_thres_temp: float,
     upper_fire_thres_temp: float,
+    not_fire_label: int = 0, 
+    maybe_fire_label: int = 125,
+    is_fire_label: int = 255,
 ) -> Tensor:
     """
     3-class segmentation task annotation, labels
-    0: (-inf, fire_thres_temp]
-    1: (fire_thres_temp, upper_fire_thres_temp)
-    2: [upper_fire_thres_temp, +inf)
+
+    not_fire: (-inf, fire_thres_temp]
+
+    maybe_fire: (fire_thres_temp, upper_fire_thres_temp)
+
+    is_fire: [upper_fire_thres_temp, +inf)
     """
-    tgt = img.new_zeros(img.shape, dtype=torch.uint8)
-    tgt[tgt > fire_thres_temp] = 1
-    tgt[tgt >= upper_fire_thres_temp] = 2
+    tgt = img.new_full(img.shape, fill_value=not_fire_label, dtype=torch.uint8)
+    # import pdb; pdb.set_trace()
+    tgt[img > fire_thres_temp] = maybe_fire_label
+    tgt[img >= upper_fire_thres_temp] = is_fire_label
     return tgt
 
 

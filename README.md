@@ -83,16 +83,19 @@ python -m src.ldm.train vqvae_checkpoint=/mnt/data/wildfire/runs/VQVAE/version_4
 Generating novel images with the LDM with
 
 ```
-python -m src.scripts.generate path/to/save/new/images path/to/ldm.ckpt num_of_images
+OMP_NUM_THREADS=16 torchrun --nproc-per-node 4 -m src.scripts.generate /mnt/data/wildfire/synthetic/generated /mnt/data/wildfire/runs/LDM/version_5/checkpoints/step
+=19000-fid_score=8.218.ckpt 3500 --batch_size 16
 ```
 
-Select highest batch size that fits in memory to speed up generation process.
+We assign each of the 4 GPUs 16 CPUs and generate 3500 images using a batch size of 32 per GPU to run the inference code. The output is saved to /mnt/data/wildfire/synthetic/generated, in a next step we can produce images with different environment temperatures by a heuristic augmentation strategy. With a batch size of 16 the GPU memory consumption is already a bit over 24 Gigabyte on the GPU with rank 0 (18 Gigabyte on the others).
 
-Example:
+Augmenting the generated images automatically for a range of specified ambient temperatures can be done with
 
 ```
-python -m src.scripts.generate /mnt/data/wildfire/generated /mnt/data/wildfire/runs/LDM/version_4/checkpoints/step=12500-fid_score=8.807.ckpt 100 --batch_size 32
+python -m src.scripts.multi_augment
 ```
+
+
 
 ## Running Analytics and Visualizations
 
