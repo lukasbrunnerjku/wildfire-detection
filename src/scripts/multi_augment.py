@@ -25,7 +25,7 @@ class Conf():
 
 
 def parse_args():
-    conf = OmegaConf.structured(Conf)
+    conf = OmegaConf.structured(Conf())
     file = OmegaConf.load("src/configs/multi_augment.yaml")
     conf = OmegaConf.merge(conf, file)
     return conf
@@ -36,6 +36,7 @@ if __name__ == "__main__":
     conf = parse_args()
     print(conf)
 
+    # import pdb; pdb.set_trace()
     amb_temps = [t for t in range(conf.start_amb_temp, conf.stop_amb_temp, conf.step_amb_temp)]
 
     dataset = build_dataset(Path(conf.datadir))
