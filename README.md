@@ -21,6 +21,14 @@ Install the package dependencies
 pip install -r requirements.txt
 ```
 
+## Help
+
+GPU server, copyright changes are required to move training checkpoints.
+
+```
+chmod -R g+rw *
+```
+
 ## Running Code
 
 The original thermal data mean and standard deviation is 2.7935 and 5.9023, for the
