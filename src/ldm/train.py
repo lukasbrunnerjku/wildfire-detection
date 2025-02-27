@@ -38,6 +38,7 @@ from ..vqvae.train import load_ae_from_checkpoint, AutoEncoderType
 class TrainConfig:
     logdir: Optional[str] = None
     vqvae_checkpoint: Optional[str] = None
+    ldm_checkpoint: Optional[str] = None
     block_out_channels: list[int] = field(default_factory=lambda: [64, 128, 256, 512])
     train_batch_size: int = 16
     eval_batch_size: int = 128
@@ -47,13 +48,13 @@ class TrainConfig:
     weight_decay: float = 0.0
     beta1: float = 0.9
     beta2: float = 0.99
-    warmup_steps: int = 500
-    train_steps: int = 19500
+    warmup_steps: int = 100
+    train_steps: int = 4901
     seed: int = 42
     device: str = "cuda"
-    num_workers: int = -1
-    log_every_n_steps: int = 50
-    vis_every_n_steps: int = 500 
+    num_workers: int = 0
+    log_every_n_steps: int = 100
+    vis_every_n_steps: int = 500
     val_every_n_steps: int = 500
     num_sanity_steps: int = -1
     gradient_clip_val: float = 1.0
@@ -128,20 +129,22 @@ class LDM(LightningModule):
         self.first_validation_epoch_end = True
 
     def configure_optimizers(self):
-        weight_decay = adjusted_weight_decay(
-            self.config.weight_decay,
-            self.config.train_batch_size,
-            self.config.train_steps
-        )
+        # weight_decay = adjusted_weight_decay(
+        #     self.config.weight_decay,
+        #     self.config.train_batch_size,
+        #     self.config.train_steps
+        # )
+        weight_decay = self.config.weight_decay
         decay, no_decay = weight_decay_parameter_split(self.unet)
         groups = [
             {"params": decay, "weight_decay": weight_decay},
             {"params": no_decay, "weight_decay": 0.0},
         ]
-        optimizer = torch.optim.Adam(
+        optimizer = torch.optim.AdamW(
             groups,
             lr=self.config.learning_rate,
             betas=(self.config.beta1, self.config.beta2),
+            weight_decay=weight_decay,
         )
         lr_scheduler = torch.optim.lr_scheduler.SequentialLR(
             optimizer,
@@ -186,6 +189,11 @@ class LDM(LightningModule):
 
             self.unet.latent_mean.data = latent_mean
             self.unet.latent_std.data = latent_std
+        elif (
+            self.global_step == 0
+            and batch_idx == 0
+        ):  # Already set in pretrained checkpoint.
+            self.print(f"{self.unet.latent_mean.data=} {self.unet.latent_std.data=}")
 
     @torch.inference_mode()
     def generate_new_images(
@@ -406,8 +414,10 @@ def load_ldm_from_checkpoint(
     ckpt: str,
     use_ema_weights: bool = True,
     map_location=None,  # ie. map_location = {'cuda:1':'cuda:0'}
+    **conf,
 ) -> LDM:
-    model = LDM.load_from_checkpoint(ckpt, map_location=map_location)
+    model = LDM.load_from_checkpoint(ckpt, map_location=map_location, **conf)
+    model.restarted_from_ckpt = True
     if use_ema_weights:
         shadow_params = load_shadow_params(ckpt)
         copy_to(shadow_params, model.unet.parameters())
@@ -420,7 +430,6 @@ def main():
     args = OmegaConf.from_cli()
     conf = OmegaConf.merge(conf, file, args)
 
-    assert conf.vqvae_checkpoint is not None
     assert conf.logdir is not None
     assert conf.data.folder is not None
     assert conf.data.mean is not None
@@ -432,7 +441,18 @@ def main():
     set_torch_options()
 
     datamodule = DataModule(conf)
-    model = LDM(conf)
+
+    ldm_checkpoint = conf.ldm_checkpoint
+    del conf.ldm_checkpoint
+
+    if ldm_checkpoint is not None:
+        model = load_ldm_from_checkpoint(ldm_checkpoint, **conf)
+    else:
+        assert conf.vqvae_checkpoint is not None
+        model = LDM(conf)
+
+    # print(model.config)
+    # import pdb; pdb.set_trace()
 
     lr_monitor = LearningRateMonitor(logging_interval="step")
     model_checkpoint = ModelCheckpoint(
