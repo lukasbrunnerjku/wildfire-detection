@@ -10,3 +10,4 @@ vector-quantize-pytorch==1.17.8
 opencv-python
 pip_system_certs ; sys_platform == "linux"
 omegaconf
+aiofiles
