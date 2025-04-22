@@ -42,6 +42,7 @@ class ModelConf:
     residual_blocks: int = 2
     residual_channels: int = 32
     embed_dim: int = 64
+    gated: bool = False
 
 
 @dataclass
@@ -80,6 +81,19 @@ if __name__ == "__main__":
         OmegaConf.load("src/configs/ir/ae.yaml"),
     )
     setup_torch(conf.seed)
+
+    if conf.model.gated:
+        from .gated import Conv2d, ConvTranspose2d
+    else:
+        from torch.nn import Conv2d, ConvTranspose2d
+
+    kwargs = {k: v for k, v in conf.model.items() if k != "gated"}
+    model = Autoencoder(
+        in_channel=1,
+        conv_cls=Conv2d,
+        conv_transpose_cls=ConvTranspose2d,
+        **kwargs,
+    )
     
 
 # # Initialize Accelerator and TensorBoard writer
