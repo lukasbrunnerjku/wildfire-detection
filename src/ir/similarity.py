@@ -63,17 +63,17 @@ def gaussian_filter(input: Tensor, win: Tensor) -> Tensor:
 
 
 def _ssim(
-    X: Tensor,
-    Y: Tensor,
+    x: Tensor,
+    y: Tensor,
     data_range: float,
     win: Tensor,
     K: tuple[float, float] = (0.01, 0.03)
 ) -> Tensor:
-    r""" Calculate ssim index for X and Y
+    r""" Calculate ssim index for x and y
 
     Args:
-        X (torch.Tensor): images
-        Y (torch.Tensor): images
+        x (torch.Tensor): images
+        y (torch.Tensor): images
         data_range (float or int): value range of input images. (usually 1.0 or 255)
         win (torch.Tensor): 1-D gauss kernel
 
@@ -81,24 +81,24 @@ def _ssim(
         torch.Tensor: ssim result.
     """
     K1, K2 = K
-    # batch, channel, [depth,] height, width = X.shape
+    # batch, channel, [depth,] height, width = x.shape
     compensation = 1.0
 
     C1 = (K1 * data_range) ** 2
     C2 = (K2 * data_range) ** 2
 
-    win = win.to(X.device, dtype=X.dtype)
+    win = win.to(x.device, dtype=x.dtype)
 
-    mu1 = gaussian_filter(X, win)
-    mu2 = gaussian_filter(Y, win)
+    mu1 = gaussian_filter(x, win)
+    mu2 = gaussian_filter(y, win)
 
     mu1_sq = mu1.pow(2)
     mu2_sq = mu2.pow(2)
     mu1_mu2 = mu1 * mu2
 
-    sigma1_sq = compensation * (gaussian_filter(X * X, win) - mu1_sq)
-    sigma2_sq = compensation * (gaussian_filter(Y * Y, win) - mu2_sq)
-    sigma12 = compensation * (gaussian_filter(X * Y, win) - mu1_mu2)
+    sigma1_sq = compensation * (gaussian_filter(x * x, win) - mu1_sq)
+    sigma2_sq = compensation * (gaussian_filter(y * y, win) - mu2_sq)
+    sigma12 = compensation * (gaussian_filter(x * y, win) - mu1_mu2)
 
     cs_map = (2 * sigma12 + C2) / (sigma1_sq + sigma2_sq + C2)  # set alpha=beta=gamma=1
     ssim_map = ((2 * mu1_mu2 + C1) / (mu1_sq + mu2_sq + C1)) * cs_map
@@ -107,8 +107,8 @@ def _ssim(
 
 
 def ssim_torch(
-    X: Tensor,
-    Y: Tensor,
+    x: Tensor,
+    y: Tensor,
     data_range: float = 255,
     size_average: bool = True,
     win_size: int = 11,
@@ -117,10 +117,10 @@ def ssim_torch(
     K: tuple[float, float] = (0.01, 0.03),
     nonnegative_ssim: bool = False,
 ) -> Tensor:
-    r""" interface of ssim
+    r"""
     Args:
-        X (torch.Tensor): a batch of images, (N,C,H,W)
-        Y (torch.Tensor): a batch of images, (N,C,H,W)
+        x (torch.Tensor): a batch of images, (N,C,H,W)
+        y (torch.Tensor): a batch of images, (N,C,H,W)
         data_range (float or int, optional): value range of input images. (usually 1.0 or 255)
         size_average (bool, optional): if size_average=True, ssim of all images will be averaged as a scalar
         win_size: (int, optional): the size of gauss kernel
@@ -132,15 +132,15 @@ def ssim_torch(
     Returns:
         torch.Tensor: ssim results
     """
-    if not X.shape == Y.shape:
-        raise ValueError(f"Input images should have the same dimensions, but got {X.shape} and {Y.shape}.")
+    if not x.shape == y.shape:
+        raise ValueError(f"Input images should have the same dimensions, but got {x.shape} and {y.shape}.")
 
-    for d in range(len(X.shape) - 1, 1, -1):
-        X = X.squeeze(dim=d)
-        Y = Y.squeeze(dim=d)
+    for d in range(len(x.shape) - 1, 1, -1):
+        x = x.squeeze(dim=d)
+        y = y.squeeze(dim=d)
 
-    if len(X.shape) not in (4, 5):
-        raise ValueError(f"Input images should be 4-d or 5-d tensors, but got {X.shape}")
+    if len(x.shape) not in (4, 5):
+        raise ValueError(f"Input images should be 4-d or 5-d tensors, but got {x.shape}")
 
     if win is not None:  # set win_size
         win_size = win.shape[-1]
@@ -150,9 +150,9 @@ def ssim_torch(
 
     if win is None:
         win = _fspecial_gauss_1d(win_size, win_sigma)
-        win = win.repeat([X.shape[1]] + [1] * (len(X.shape) - 1))
+        win = win.repeat([x.shape[1]] + [1] * (len(x.shape) - 1))
 
-    ssim_map = _ssim(X, Y, data_range=data_range, win=win, K=K)
+    ssim_map = _ssim(x, y, data_range=data_range, win=win, K=K)
 
     if nonnegative_ssim:
         ssim_map = torch.relu(ssim_map)
@@ -161,12 +161,43 @@ def ssim_torch(
         return ssim_map.mean((2, 3))  # BxC
     else:
         return ssim_map  # BxCxHxW
+    
 
+class SSIM(nn.Module):
 
-class Similarity(nn.Module):
-
-    def __init__(self, ):
+    def __init__(
+        self,
+        win_size: int = 11,
+        win_sigma: float = 1.5,
+        win: Optional[Tensor] = None,
+        K: tuple[float, float] = (0.01, 0.03),
+    ):
         super().__init__()
+        self.win_size = win_size
+        self.win_sigma = win_sigma
+        self.win = win
+        self.K = K
+
+    def forward(
+        self,
+        x: Tensor,
+        y: Tensor,
+        data_range: float = 255,
+        size_average: bool = True,
+        nonnegative_ssim: bool = False,
+    ):
+        return ssim_torch(
+            x,
+            y,
+            data_range=data_range,
+            size_average=size_average,
+            win_size=self.win_size,
+            win_sigma=self.win_sigma,
+            win=self.win,
+            K=self.K,
+            nonnegative_ssim=nonnegative_ssim,
+        )
+
 
 if __name__ == "__main__":
     dir = "/mnt/data/wildfire/IR/Batch-1/0/101186b2bd74421681d0958ea9db264c"
@@ -238,7 +269,7 @@ if __name__ == "__main__":
     We want to measure the correct temperature, we want to decrease temperature
     deviations introduced by AOS, can we measure unseen parts? No. Can we measure
     partially observed parts that at least kept some of their structural appearance?
-    Yes.
+    yes.
 
     => Allow change only in reasonably structurally similar areas. Penalize via loss
     objective only in those areas as well. Modelling via residuals. Utilize similarity
