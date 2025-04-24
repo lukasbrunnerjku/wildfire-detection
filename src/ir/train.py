@@ -22,9 +22,11 @@ import json
 from multiprocessing import cpu_count
 import math 
 import sys
+import time
 
 from .ae import Autoencoder
 from .data import AOSDataset
+from .similarity import SSIM
 from ..utils.image import tone_mapping, pil_make_grid
 from ..utils.weight_decay import weight_decay_parameter_split
 
@@ -66,7 +68,7 @@ class TrainConf:
     train_steps: int = 4500
     log_every: int = 50  # [steps]
     vis_every: int = 500  # [steps]
-    val_every: int = 2  # [epochs]
+    val_every: int = 5  # [epochs]
     log_n_images: int = 4
     train_batch_size: int = 16
     eval_batch_size: int = 32
@@ -94,6 +96,18 @@ def create_grid(ncol: int, *imgs_list: list[Tensor], colormaps=None):
         )
     grid = pil_make_grid(tonemapped, ncol=ncol)
     return grid
+
+
+class Criterion(nn.Module):
+
+    def __init__(self, win_size: int):
+        super().__init__()
+        self.mse = nn.MSELoss()
+        self.ssim = SSIM(win_size=win_size)
+        self._last_mask = None
+
+    def forward(self, res, tgt):
+        self.ssim(data_range=, nonnegative_ssim=True, size_average=False)
         
 
 if __name__ == "__main__":
@@ -106,9 +120,13 @@ if __name__ == "__main__":
     )
     setup_torch(conf.seed)
 
+    time_now = str(time.strftime('%Y-%m-%d_%H-%M-%S'))
+
+    conf.runs = conf.runs / time_now
     print(f"Logging runs to: {conf.runs}")
     conf.runs.mkdir(parents=True, exist_ok=True)
 
+    conf.checkpoints = conf.checkpoints / time_now
     print(f"Saving checkpoints at: {conf.checkpoints}")
     conf.checkpoints.mkdir(parents=True, exist_ok=True)
 
@@ -153,6 +171,8 @@ if __name__ == "__main__":
     )
     
     criterion = nn.MSELoss()
+    ssim = SSIM(win_size=7).to(accelerator.device)
+    # ssim(data_range=, nonnegative_ssim=True, size_average=False)
 
     decay, no_decay = weight_decay_parameter_split(model)
     groups = [
@@ -196,6 +216,8 @@ if __name__ == "__main__":
         best_val_loss = float('inf')
         total_steps = conf.train_steps + conf.warmup_steps
         epochs = math.ceil(total_steps / len(dataloader))
+        aos_mean, aos_std = None, None
+        tgt_mean, tgt_std = None, None
         pbar = tqdm(total=total_steps, desc="Training", unit="step")
 
         while global_step < conf.train_steps:
@@ -206,9 +228,20 @@ if __name__ == "__main__":
                 gt = batch["GT"].to(accelerator.device)[:, None, :, :]
                 tgt = batch["Residual"].to(accelerator.device)[:, None, :, :]
 
+                if aos_mean is None or aos_std is None:
+                    aos_mean = aos.mean()
+                    aos_std = aos.std()
+
+                if tgt_mean is None or tgt_std is None:
+                    tgt_mean = tgt.mean()
+                    tgt_std = tgt.std()
+                
+                aos_normalized = (aos - aos_mean) / aos_std
+                tgt_normalized = (tgt - tgt_mean) / tgt_std
+
                 optimizer.zero_grad()
-                residual = model(aos)
-                loss = criterion(residual, tgt)
+                residual_normalized = model(aos_normalized)
+                loss = criterion(residual_normalized, tgt_normalized)
                 accelerator.backward(loss)
                 optimizer.step()
                 lr_scheduler.step()
@@ -223,6 +256,7 @@ if __name__ == "__main__":
                     })
                 
                 if global_step % conf.vis_every == 0:
+                    residual = residual_normalized * tgt_std + tgt_mean
                     grid = create_grid(
                         conf.log_n_images,
                         (aos + residual).detach().cpu(),
@@ -260,8 +294,11 @@ if __name__ == "__main__":
                         gt = batch["GT"].to(accelerator.device)[:, None, :, :]
                         tgt = batch["Residual"].to(accelerator.device)[:, None, :, :]
 
-                        residual = model(aos)
-                        val_loss += criterion(residual, tgt).item()
+                        aos_normalized = (aos - aos_mean) / aos_std
+                        tgt_normalized = (tgt - tgt_mean) / tgt_std
+
+                        residual_normalized = model(aos_normalized)
+                        val_loss += criterion(residual_normalized, tgt_normalized).item()
                         
                 avg_val_loss = val_loss / len(val_dataloader)
                 writer.add_scalar("val/avg_loss", avg_val_loss, epoch)
@@ -270,6 +307,7 @@ if __name__ == "__main__":
                     best_val_loss = avg_val_loss
                     torch.save(model.state_dict(), conf.checkpoints / "best.pth")
                 
+                residual = residual_normalized * tgt_std + tgt_mean
                 grid = create_grid(
                     conf.log_n_images,
                     (aos + residual).detach().cpu(),
