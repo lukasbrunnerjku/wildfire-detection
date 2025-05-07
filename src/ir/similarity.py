@@ -1,19 +1,15 @@
 import torch
+from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF 
 from pathlib import Path
 import matplotlib.pyplot as plt
 from skimage.metrics import structural_similarity as ssim
-
-from .utils import load_xy
-
-import torch
-import torch.nn.functional as F
-import torch.nn as nn
-from torch import Tensor
 from typing import Optional
 import warnings
+
+from .utils import load_xy
 
 
 def _fspecial_gauss_1d(size: int, sigma: float) -> Tensor:

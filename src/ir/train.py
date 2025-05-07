@@ -7,6 +7,7 @@ import torchvision.datasets as datasets
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from torch.utils.tensorboard import SummaryWriter
+import torchvision.transforms.functional as TF
 import torchvision.utils as vutils
 import os
 from omegaconf import OmegaConf
@@ -106,8 +107,33 @@ class Criterion(nn.Module):
         self.ssim = SSIM(win_size=win_size)
         self._last_mask = None
 
-    def forward(self, res, tgt):
-        self.ssim(data_range=, nonnegative_ssim=True, size_average=False)
+    def forward(
+        self,
+        res: Tensor,
+        tgt: Tensor,
+        aos: Tensor,
+        gt: Tensor,
+    ):  # 
+        """
+        All arguments of shape Bx1xHxW.
+        res ... predicted residual
+        tgt ... residual target (diff. of aos and gt)
+        aos ... input of our model, distorted by AOS
+        gt ... if AOS would be error free
+        """
+        x = TF.normalize(aos, aos.mean(), aos.std())  # Bx1xHxW
+        y = TF.normalize(gt, gt.mean(), gt.std())[0]  # Bx1xHxW
+        
+        gmax = float(torch.max(x.max(), y.max()))
+        gmin = float(torch.min(x.min(), y.min()))
+        dxy = gmax - gmin
+
+        # More similar regions should be punished more if incorrect.
+        ssim = self.ssim(data_range=dxy, nonnegative_ssim=True, size_average=False)
+        mse = self.mse(res, tgt)
+
+        loss = (ssim * mse).sum() / (ssim.sum() + 1e-5)  # TODO or .mean() ??
+        return loss
         
 
 if __name__ == "__main__":
@@ -169,10 +195,6 @@ if __name__ == "__main__":
         conv_transpose_cls=ConvTranspose2d,
         **kwargs,
     )
-    
-    criterion = nn.MSELoss()
-    ssim = SSIM(win_size=7).to(accelerator.device)
-    # ssim(data_range=, nonnegative_ssim=True, size_average=False)
 
     decay, no_decay = weight_decay_parameter_split(model)
     groups = [
@@ -205,6 +227,8 @@ if __name__ == "__main__":
     accelerator = Accelerator(cpu=conf.device == "cpu")
     writer = SummaryWriter(conf.runs)
 
+    criterion = Criterion(win_size=7).to(accelerator.device)
+
     # Prepare everything with Accelerator
     model, optimizer, dataloader, val_dataloader = accelerator.prepare(
         model, optimizer, dataloader, val_dataloader
@@ -224,6 +248,7 @@ if __name__ == "__main__":
             total_loss = 0
             model.train()
             for batch in dataloader:
+                # Move to device; Shapes of Bx1xHxW
                 aos = batch["AOS"].to(accelerator.device)[:, None, :, :]
                 gt = batch["GT"].to(accelerator.device)[:, None, :, :]
                 tgt = batch["Residual"].to(accelerator.device)[:, None, :, :]
@@ -236,12 +261,14 @@ if __name__ == "__main__":
                     tgt_mean = tgt.mean()
                     tgt_std = tgt.std()
                 
+                # Normalize the aos input as models learn better on normalized data.
+                # Same reason for normalizing the targets, residuals in our case.
                 aos_normalized = (aos - aos_mean) / aos_std
                 tgt_normalized = (tgt - tgt_mean) / tgt_std
 
                 optimizer.zero_grad()
                 residual_normalized = model(aos_normalized)
-                loss = criterion(residual_normalized, tgt_normalized)
+                loss = criterion(residual_normalized, tgt_normalized, aos, gt)
                 accelerator.backward(loss)
                 optimizer.step()
                 lr_scheduler.step()
