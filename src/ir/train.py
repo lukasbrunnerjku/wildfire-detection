@@ -46,11 +46,14 @@ def setup_torch(seed: int):
 
 @dataclass
 class ModelConf:
+    gated: bool = False
     channels: int = 128
     residual_blocks: int = 2
     residual_channels: int = 32
     embed_dim: int = 64
-    gated: bool = False
+    # Num. of different env. temp. but
+    # if set to 0 => no conditioning used.
+    num_cond_embed: int = 31
 
 
 @dataclass
@@ -64,14 +67,14 @@ class DataConf:
 @dataclass
 class TrainConf:
     seed: int = 42
-    device: str = "cuda"  # TODO: Check if GPUs are free!
+    device: str = "cpu"  # TODO: Check if GPUs are free!
     warmup_steps: int = 500
     train_steps: int = 4500
     log_every: int = 50  # [steps]
     vis_every: int = 500  # [steps]
     val_every: int = 5  # [epochs]
     log_n_images: int = 4
-    train_batch_size: int = 16
+    train_batch_size: int = 2
     eval_batch_size: int = 32
     learning_rate: float = 1e-3
     min_learning_rate: float = 1e-5
@@ -105,7 +108,7 @@ class Criterion(nn.Module):
         super().__init__()
         self.mse = nn.MSELoss()
         self.ssim = SSIM(win_size=win_size)
-        self._last_mask = None
+        self._last_ssim = None
 
     def forward(
         self,
@@ -121,17 +124,19 @@ class Criterion(nn.Module):
         aos ... input of our model, distorted by AOS
         gt ... if AOS would be error free
         """
-        x = TF.normalize(aos, aos.mean(), aos.std())  # Bx1xHxW
-        y = TF.normalize(gt, gt.mean(), gt.std())[0]  # Bx1xHxW
-        
-        gmax = float(torch.max(x.max(), y.max()))
-        gmin = float(torch.min(x.min(), y.min()))
-        dxy = gmax - gmin
+        with torch.no_grad():
+            x = TF.normalize(aos, aos.mean(), aos.std())  # Bx1xHxW
+            y = TF.normalize(gt, gt.mean(), gt.std())[0]  # Bx1xHxW
+            
+            gmax = float(torch.max(x.max(), y.max()))
+            gmin = float(torch.min(x.min(), y.min()))
+            dxy = gmax - gmin
 
-        # More similar regions should be punished more if incorrect.
-        ssim = self.ssim(data_range=dxy, nonnegative_ssim=True, size_average=False)
+            # More similar regions should be punished more if incorrect.
+            ssim = self.ssim(data_range=dxy, nonnegative_ssim=True, size_average=False)
+            self._last_ssim = ssim  # For visualization purpose.
+
         mse = self.mse(res, tgt)
-
         loss = (ssim * mse).sum() / (ssim.sum() + 1e-5)  # TODO or .mean() ??
         return loss
         
@@ -194,7 +199,7 @@ if __name__ == "__main__":
         conv_cls=Conv2d,
         conv_transpose_cls=ConvTranspose2d,
         **kwargs,
-    )
+    )  # TODO UNet like skip connections?
 
     decay, no_decay = weight_decay_parameter_split(model)
     groups = [
@@ -240,6 +245,7 @@ if __name__ == "__main__":
         best_val_loss = float('inf')
         total_steps = conf.train_steps + conf.warmup_steps
         epochs = math.ceil(total_steps / len(dataloader))
+        # Calculate normalization statistics over initial batch.
         aos_mean, aos_std = None, None
         tgt_mean, tgt_std = None, None
         pbar = tqdm(total=total_steps, desc="Training", unit="step")
@@ -252,6 +258,7 @@ if __name__ == "__main__":
                 aos = batch["AOS"].to(accelerator.device)[:, None, :, :]
                 gt = batch["GT"].to(accelerator.device)[:, None, :, :]
                 tgt = batch["Residual"].to(accelerator.device)[:, None, :, :]
+                et = batch["ET"].to(accelerator.device)  # B, >> indices
 
                 if aos_mean is None or aos_std is None:
                     aos_mean = aos.mean()
@@ -267,7 +274,12 @@ if __name__ == "__main__":
                 tgt_normalized = (tgt - tgt_mean) / tgt_std
 
                 optimizer.zero_grad()
-                residual_normalized = model(aos_normalized)
+                if model.embedding is not None:
+                    # Env. temp. as cond
+                    # NOTE: Only working with env. temp. from 0 to Tmax (integers)
+                    residual_normalized = model(aos_normalized, et)
+                else:
+                    residual_normalized = model(aos_normalized)
                 loss = criterion(residual_normalized, tgt_normalized, aos, gt)
                 accelerator.backward(loss)
                 optimizer.step()
@@ -290,11 +302,13 @@ if __name__ == "__main__":
                         gt.cpu(),
                         residual.detach().cpu(),
                         tgt.cpu(),
+                        criterion._last_ssim.cpu(),
                         colormaps=[
                             cv2.COLORMAP_INFERNO,
                             cv2.COLORMAP_INFERNO,
                             cv2.COLORMAP_JET,
                             cv2.COLORMAP_JET,
+                            cv2.COLORMAP_VIRIDIS,
                         ],
                     )
                     writer.add_image(
@@ -320,12 +334,16 @@ if __name__ == "__main__":
                         aos = batch["AOS"].to(accelerator.device)[:, None, :, :]
                         gt = batch["GT"].to(accelerator.device)[:, None, :, :]
                         tgt = batch["Residual"].to(accelerator.device)[:, None, :, :]
-
+                        et = batch["ET"].to(accelerator.device)  # B, >> indices
+                        
                         aos_normalized = (aos - aos_mean) / aos_std
                         tgt_normalized = (tgt - tgt_mean) / tgt_std
 
-                        residual_normalized = model(aos_normalized)
-                        val_loss += criterion(residual_normalized, tgt_normalized).item()
+                        if model.embedding is not None:
+                            residual_normalized = model(aos_normalized, et)
+                        else:
+                            residual_normalized = model(aos_normalized)
+                        val_loss += criterion(residual_normalized, tgt_normalized, aos, gt).item()
                         
                 avg_val_loss = val_loss / len(val_dataloader)
                 writer.add_scalar("val/avg_loss", avg_val_loss, epoch)
@@ -341,11 +359,13 @@ if __name__ == "__main__":
                     gt.cpu(),
                     residual.detach().cpu(),
                     tgt.cpu(),
+                    criterion._last_ssim.cpu(),
                     colormaps=[
                         cv2.COLORMAP_INFERNO,
                         cv2.COLORMAP_INFERNO,
                         cv2.COLORMAP_JET,
                         cv2.COLORMAP_JET,
+                        cv2.COLORMAP_VIRIDIS,
                     ],
                 )
                 writer.add_image(

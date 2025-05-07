@@ -28,6 +28,12 @@
             "type": "debugpy",
             "request": "launch",
             "module": "src.ir.data"
+        },
+        {
+            "name": "ae",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.ir.ae"
         }
     ]
 }

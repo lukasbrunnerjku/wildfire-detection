@@ -35,13 +35,15 @@ class AOSDataset(Dataset):
         return len(self.folders)
 
     def __getitem__(self, idx):
-        folder = self.folders[idx]
+        folder = self.folders[idx]  # ie. /Batch-1/27/abc30f62e9ba47cab97c3ef3850a114d
+        et = int(folder.parent.name)  # Environment Temperature (ET)
         x, y = load_xy(folder)
         z = y - x
         return {
             "AOS": x,
             "GT": y,
             "Residual": z,
+            "ET": et,
         }
     
     def split(self, val_split: float, seed: Optional[int] = None):
@@ -69,5 +71,5 @@ if __name__ == "__main__":
 
     dataloader = DataLoader(dataset, batch_size=2, shuffle=True)
     for batch in dataloader:
-        print(batch["AOS"].shape, batch["GT"].shape, batch["Residual"].shape)
+        print(batch["AOS"].shape, batch["GT"].shape, batch["Residual"].shape, batch["ET"].shape)
         break

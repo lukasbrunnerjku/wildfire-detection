@@ -1,6 +1,73 @@
+import torch
 from torch import nn
 from torch.nn import functional as F
+from typing import Optional
 
+
+ACTIVATION_FUNCTIONS = {
+    "swish": nn.SiLU(),
+    "silu": nn.SiLU(),
+    "mish": nn.Mish(),
+    "gelu": nn.GELU(),
+    "relu": nn.ReLU(),
+}
+
+
+def get_activation(act_fn: str) -> nn.Module:
+    """Helper function to get activation function from string.
+
+    Args:
+        act_fn (str): Name of activation function.
+
+    Returns:
+        nn.Module: Activation function.
+    """
+
+    act_fn = act_fn.lower()
+    if act_fn in ACTIVATION_FUNCTIONS:
+        return ACTIVATION_FUNCTIONS[act_fn]
+    else:
+        raise ValueError(f"Unsupported activation function: {act_fn}")
+    
+
+class AdaGroupNorm(nn.Module):
+    r"""
+    GroupNorm layer modified to incorporate timestep embeddings.
+
+    Parameters:
+        embedding_dim (`int`): The size of each embedding vector.
+        num_embeddings (`int`): The size of the embeddings dictionary.
+        num_groups (`int`): The number of groups to separate the channels into.
+        act_fn (`str`, *optional*, defaults to `None`): The activation function to use.
+        eps (`float`, *optional*, defaults to `1e-5`): The epsilon value to use for numerical stability.
+    """
+
+    def __init__(
+        self, embedding_dim: int, out_dim: int, num_groups: int, act_fn: Optional[str] = None, eps: float = 1e-5
+    ):
+        super().__init__()
+        self.num_groups = num_groups
+        self.eps = eps
+        self.out_dim = out_dim
+
+        if act_fn is None:
+            self.act = None
+        else:
+            self.act = get_activation(act_fn)
+
+        self.linear = nn.Linear(embedding_dim, out_dim * 2)
+        
+    def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
+        if self.act:
+            emb = self.act(emb)
+        emb = self.linear(emb)
+        emb = emb[:, :, None, None]
+        scale, shift = emb.chunk(2, dim=1)
+
+        x = F.group_norm(x, self.num_groups, eps=self.eps)
+        x = x * (1 + scale) + shift
+        return x
+    
 
 class ResBlock(nn.Module):
     def __init__(self, in_channel, channel, conv_cls=None):
@@ -20,6 +87,68 @@ class ResBlock(nn.Module):
 
     def forward(self, input):
         return input + self.net(input)
+    
+
+class CondSequential(nn.Module):
+    def __init__(self, *layers):
+        super().__init__()
+        self.layers = nn.ModuleList(layers)
+
+    def forward(self, x, cond=None):
+        for layer in self.layers:
+            if cond is not None:
+                x = layer(x, cond)
+            else:
+                x = layer(x)
+        return x
+    
+
+class CondResBlock(nn.Module):
+    def __init__(
+        self,
+        in_channel,
+        channel,
+        emb_channels,
+        conv_cls=None,
+        groups: int = 32,  # typical 32 if channels > 32, aim for 4-16 channels per group
+        # >> to many groups make normalization unstable! Is independent of batch size.
+        # groups = 1 => layernorm and groups = channels => instance norm
+        groups_out: Optional[int] = None,
+        eps: float = 1e-6,
+        dropout: float = 0.0,
+        non_linearity: str = "swish",
+    ):  # see ResnetBlockCondNorm2D from HuggingFace
+        super().__init__()
+
+        if conv_cls is None:
+            conv_cls = nn.Conv2d
+
+        if groups_out is None:
+            groups_out = groups
+
+        if in_channel < 32:
+            groups = 1  # layernorm
+        
+        if channel < 32:
+            groups_out = 1  # layernorm
+
+        self.norm1 = AdaGroupNorm(emb_channels, in_channel, groups, eps=eps)
+        self.norm2 = AdaGroupNorm(emb_channels, channel, groups_out, eps=eps)
+        self.dropout = torch.nn.Dropout(dropout)
+        self.nonlinearity = get_activation(non_linearity)
+        self.conv1 = conv_cls(in_channel, channel, 3, padding=1)
+        self.conv2 = conv_cls(channel, in_channel, 1)
+
+    def forward(self, input, emb):  # 2nd input is condition
+        hidden_states = input
+        hidden_states = self.norm1(hidden_states, emb)
+        hidden_states = self.nonlinearity(hidden_states)
+        hidden_states = self.conv1(hidden_states)
+        hidden_states = self.norm2(hidden_states, emb)
+        hidden_states = self.nonlinearity(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.conv2(hidden_states)
+        return input + hidden_states
 
 
 class RepeatedResBlock(nn.Module):
@@ -31,6 +160,24 @@ class RepeatedResBlock(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+    
+
+class CondRepeatedResBlock(nn.Module):
+    def __init__(
+        self,
+        channel,
+        res_channel,
+        res_block,
+        emb_channel,
+        conv_cls=None,
+    ) -> None:
+        super().__init__()
+        self.net = CondSequential(
+            *[CondResBlock(channel, res_channel, emb_channel, conv_cls) for _ in range(res_block)]
+        )
+
+    def forward(self, x, emb):
+        return self.net(x, emb)
 
 
 class Down(nn.Module):
@@ -53,15 +200,46 @@ class Encoder(nn.Module):
 
         self.blocks = nn.Sequential(
             nn.ReplicationPad2d((1, 1, 1, 1)),
-            Down(in_channel + 1, channel // 4, conv_cls),
+            Down(in_channel, channel // 4, conv_cls),
             RepeatedResBlock(channel // 4, res_channel // 4, res_block, conv_cls),
             Down(channel // 4, channel, conv_cls),
             RepeatedResBlock(channel, res_channel, res_block, conv_cls),
         )
 
     def forward(self, input):
-        return self.blocks(F.pad(input, (0, 0, 0, 0, 0, 1), mode="constant", value=1.0))
+        return self.blocks(input)
 
+
+class CondEncoder(nn.Module):
+    def __init__(
+        self,
+        in_channel,
+        channel,
+        res_block,
+        res_channel,
+        emb_channel,
+        conv_cls=None,
+    ):
+        super().__init__()
+        
+        self.pad = nn.ReplicationPad2d((1, 1, 1, 1))
+        self.down1 = Down(in_channel, channel // 4, conv_cls)
+        self.block1 = CondRepeatedResBlock(
+            channel // 4, res_channel // 4, res_block, emb_channel, conv_cls
+        )
+        self.down2 = Down(channel // 4, channel, conv_cls)
+        self.block2 = CondRepeatedResBlock(
+            channel, res_channel, res_block, emb_channel, conv_cls
+        )
+
+    def forward(self, input, emb):
+        x = self.pad(input)
+        x = self.down1(x)
+        x = self.block1(x, emb)
+        x = self.down2(x)
+        x = self.block2(x, emb)
+        return x
+    
 
 class Up(nn.Module):
     def __init__(self, channel, channel_out, conv_transpose_cls=None) -> None:
@@ -113,14 +291,15 @@ class Decoder(nn.Module):
         return self.blocks(input)
     
 
-class Autoencoder(nn.Module):
+class CondDecoder(nn.Module):
     def __init__(
         self,
-        in_channel=3,
-        channels=128,
-        residual_blocks=2,
-        residual_channels=32,
-        embed_dim=64,
+        in_channel,
+        out_channel,
+        channel,
+        res_block,
+        res_channel,
+        emb_channel,
         conv_cls=None,
         conv_transpose_cls=None,
     ):
@@ -129,19 +308,91 @@ class Autoencoder(nn.Module):
         if conv_cls is None:
             conv_cls = nn.Conv2d
 
-        self.encoder = nn.Sequential(
-            Encoder(in_channel, channels, residual_blocks, residual_channels, conv_cls),
-            conv_cls(channels, embed_dim, 1),
-        )
-        self.decoder = Decoder(
-            embed_dim,
-            in_channel,
-            channels,
-            residual_blocks,
-            residual_channels,
-            conv_cls,
-            conv_transpose_cls,
-        )
+        if conv_transpose_cls is None:
+            conv_transpose_cls = nn.ConvTranspose2d
+
+        self.conv_in = conv_cls(in_channel, channel, 3, padding=1)
+        self.conv1 = CondRepeatedResBlock(channel, res_channel, res_block, emb_channel, conv_cls)
+        self.up1 = Up(channel, channel // 2, conv_transpose_cls)
+        self.conv2 = CondRepeatedResBlock(channel // 2, res_channel // 2, 1, emb_channel, conv_cls)
+        self.up2 = Up(channel // 2, channel // 4, conv_transpose_cls)
+        self.conv3 = CondRepeatedResBlock(channel // 4, res_channel // 4, 1, emb_channel, conv_cls)
+        self.conv_out = conv_cls(channel // 4, out_channel, 1)
+
+    def forward(self, input, emb):
+        x = self.conv_in(input)
+        x = self.conv1(x, emb)
+        x = self.up1(x)
+        x = self.conv2(x, emb)
+        x = self.up2(x)
+        x = self.conv3(x, emb)
+        x = self.conv_out(x)
+        return x
+    
+
+class Autoencoder(nn.Module):
+    def __init__(
+        self,
+        in_channel=3,
+        channels=128,
+        residual_blocks=2,
+        residual_channels=32,
+        embed_dim=64,
+        num_cond_embed: int = 0,
+        cond_embed_dim: int = 64,
+        conv_cls=None,
+        conv_transpose_cls=None,
+    ):
+        """
+        Conditions must be be indices to index the embedding table.
+        In our case env. temp. start at 0 and end at 31 degree so we
+        do not need a remaping from env. temp. to indices.
+        """
+        super().__init__()
+
+        if conv_cls is None:
+            conv_cls = nn.Conv2d
+
+        self.enc_proj = conv_cls(channels, embed_dim, 1)
+
+        if num_cond_embed > 0:
+            self.embedding = nn.Embedding(num_cond_embed, cond_embed_dim)
+            self.encoder = CondEncoder(
+                in_channel,
+                channels,
+                residual_blocks,
+                residual_channels,
+                cond_embed_dim,
+                conv_cls
+            )
+            self.decoder = CondDecoder(
+                embed_dim,
+                in_channel,
+                channels,
+                residual_blocks,
+                residual_channels,
+                cond_embed_dim,
+                conv_cls,
+                conv_transpose_cls,
+            )
+        else:
+            self.embedding = None
+            self.encoder = Encoder(
+                in_channel,
+                channels,
+                residual_blocks,
+                residual_channels,
+                conv_cls
+            )
+            self.decoder = Decoder(
+                embed_dim,
+                in_channel,
+                channels,
+                residual_blocks,
+                residual_channels,
+                conv_cls,
+                conv_transpose_cls,
+            )
 
         n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"Autoencoder with {1e-6 * n_params:.3f} M parameters.")
@@ -152,12 +403,28 @@ class Autoencoder(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def forward(self, x):
-        h = self.encoder(x)
-        y = self.decoder(h)
+    def forward(self, x, cond=None):
+        # x ... BxCxHxW >> input image (aos)
+        # cond ... B, >> indices of embedding table
+        if self.embedding:
+            emb = self.embedding(cond)
+            h = self.enc_proj(self.encoder(x, emb))
+            y = self.decoder(h, emb)
+        else:
+            h = self.enc_proj(self.encoder(x))
+            y = self.decoder(h)
         return y
     
 
 if __name__ == "__main__":
-    model = Autoencoder(in_channel=1)
-    
+    num_cond_embed = 24
+    in_channel = 1
+    bsz = 2
+    x = torch.randn(bsz, in_channel, 128, 128)
+    model = Autoencoder(in_channel=in_channel, num_cond_embed=num_cond_embed)
+    if num_cond_embed > 0:
+        cond = torch.randint(0, num_cond_embed, (bsz,))
+        y = model(x, cond)
+    else:
+        y = model(x)
+    print(y.shape)

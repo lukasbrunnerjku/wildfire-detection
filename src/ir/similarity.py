@@ -278,9 +278,6 @@ if __name__ == "__main__":
     => Introduce auxilary loss based on ssim but thresholded to not penalize above ie.
     a threshold of 0.8 (as small changes could be reasonable).
 
-    TODO: Use scene_parameters.txt --> ie. "Selected Env temp: 1" to determine
-    the environment temperature and use it as condition to the model. 
-
     NOTE: Include also the min=max temp data to learn identity function.
 
     NOTE: Try one approach with hallucinations on purpose and the other without.
