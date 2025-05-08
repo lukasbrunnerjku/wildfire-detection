@@ -5,9 +5,6 @@ import cv2
 from tqdm import tqdm
 from multiprocessing import Pool, Manager, cpu_count
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import asyncio
-import aiofiles
-from tqdm.asyncio import tqdm_asyncio
 from pathlib import Path
 from functools import partial
 from PIL import Image
@@ -52,28 +49,6 @@ def process_folder(index_and_subsubdir, dt, common_min_max, grid_folder, files_l
     filename = f"{index:05d}.png"
     grid.save(grid_folder / filename)
     
-    files_list.append({"name": filename, "folder": str(subsubdir)})
-
-
-async def async_save_image(grid: Image.Image, filepath):
-    """Save image asynchronously."""
-    async with aiofiles.open(filepath, "wb") as f:
-        await f.write(grid.tobytes())  # Convert PIL image to bytes
-
-
-async def process_folder_async(index, subsubdir, dt, common_min_max, grid_folder, files_list, skipped_list):
-    x, y = load_xy(subsubdir)
-    z = y - x  
-
-    if torch.abs(z).mean() < 1.0:
-        skipped_list.append(str(subsubdir))
-        return
-
-    grid = make_grid(x, y, z, dt, common_min_max)
-
-    filename = f"{index:05d}.png"
-    await async_save_image(grid, grid_folder / filename)
-
     files_list.append({"name": filename, "folder": str(subsubdir)})
 
 
@@ -135,27 +110,6 @@ def qualitative_analysis_threads(root: Path, new_root: Path, dt: float = 20.0, c
     print(f"Metadata saved at: {meta_file}")
 
 
-async def qualitative_analysis_async(root: Path, new_root: Path, dt: float = 20.0, common_min_max: bool = True):
-    new_root.mkdir(parents=True, exist_ok=True)
-    grid_folder = new_root / "Grid"
-    grid_folder.mkdir(parents=True, exist_ok=True)
-
-    subsubdirs = find_folders(root)
-
-    files_list, skipped_list = [], []
-
-    # Cannot use "partial" with async! But there is no need anyway
-    tasks = [process_folder_async(i, subsubdir, dt, common_min_max, grid_folder, files_list, skipped_list) for i, subsubdir in enumerate(subsubdirs)]
-    
-    await tqdm_asyncio.gather(*tasks, desc="Processing", total=len(subsubdirs))
-
-    meta_file = new_root / "metadata.json"
-    async with aiofiles.open(meta_file, "w") as fp:
-        await fp.write(json.dumps({"dt": dt, "files": files_list, "skipped": skipped_list}, indent=2))
-
-    print(f"Metadata saved at: {meta_file}")
-
-
 if __name__ == "__main__":
     """
     Interpretation of COLORMAP_JET
@@ -167,12 +121,6 @@ if __name__ == "__main__":
     """Threading best suited for disk IO bound tasks."""
     new_root = Path("/mnt/data/wildfire/IR/Analysis")
     qualitative_analysis_threads(root, new_root)  # 00:33
-
-    """Async best suited for network and database query tasks."""
-    # TODO: Progress bar update only once at the end?
-    # TODO: .tif files couldnt be opened due to missing file header error?
-    # new_root = Path("/mnt/data/wildfire/IR/Analysis_async")
-    # asyncio.run(qualitative_analysis_async(root, new_root))  # 01:31
 
     """Multiprocessing best suited for CPU bound tasks."""
     # new_root = Path("/mnt/data/wildfire/IR/Analysis_mp")
