@@ -278,9 +278,5 @@ if __name__ == "__main__":
     => Introduce auxilary loss based on ssim but thresholded to not penalize above ie.
     a threshold of 0.8 (as small changes could be reasonable).
 
-    NOTE: Include also the min=max temp data to learn identity function.
-
-    NOTE: Try one approach with hallucinations on purpose and the other without.
-
     https://jku.zoom.us/j/95409146168?pwd=ZpVKsuFyfFtlha7uXt7Cj3qSMms8hK.1 
     """

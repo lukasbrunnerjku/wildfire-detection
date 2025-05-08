@@ -62,7 +62,7 @@ class AdaGroupNorm(nn.Module):
             emb = self.act(emb)
         emb = self.linear(emb)
         emb = emb[:, :, None, None]
-        scale, shift = emb.chunk(2, dim=1)
+        scale, shift = emb.chunk(2, dim=1)  # BxCx1x1
 
         x = F.group_norm(x, self.num_groups, eps=self.eps)
         x = x * (1 + scale) + shift

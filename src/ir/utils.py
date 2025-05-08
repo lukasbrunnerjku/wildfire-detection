@@ -14,6 +14,18 @@ def find_folders(root: Path) -> list[Path]:
     return subsubdirs
 
 
+def read_min_max(file: Path):
+    with open(file, "r") as fp:
+        line = fp.read()
+    min_temp, max_temp = [float(t) for t in line.split(",")]
+    return min_temp, max_temp
+
+
+def write_min_max(file: Path, mi, ma):
+    with open(file, "w") as fp:
+        fp.write(f"{mi},{ma}")
+
+
 def load_xy(dir: Path) -> tuple[Tensor, Tensor]:
     """
     x ... input image; =AOS image; in Kelvin; HxW
@@ -21,6 +33,24 @@ def load_xy(dir: Path) -> tuple[Tensor, Tensor]:
     """
     y = torch.from_numpy(np.array(Image.open(dir / "GT.tiff")))
     min_temp, max_temp = y.min(), y.max()
+    if min_temp == max_temp:
+        min_max_file = dir / "min_max_temp.txt"
+        if min_max_file.exists():
+            min_temp, max_temp = read_min_max(min_max_file)
+        else:
+            min_temps, max_temps = [], []
+            files = (dir / "images").glob("*.txt")
+            for file in files:
+                min_temp, max_temp = read_min_max(file)
+                min_temps.append(min_temp)
+                max_temps.append(max_temp)
+
+            # Find global min, max from individual views.
+            min_temp = min(min_temps)
+            max_temp = max(max_temps)
+            # Store preprocessed min/max temperatures.
+            write_min_max(min_max_file, min_temp, max_temp)
+                
     x = torch.from_numpy(cv2.imread(
         str(dir / "integrall_0.png"), -1
     )[:, :, 0].astype(np.float32))  # in [0, 255]; pixel

@@ -21,12 +21,14 @@ efficiently load the data and train the model later on.
 
 from .utils import find_folders, load_xy
 
-def process_folder(subsubdir, meta_list):
-    x, y = load_xy(subsubdir)  # HxW
-    z = y - x  # HxW
 
-    if torch.abs(z).mean() < 1.0:
-        return  # Skip corrupted files
+def process_folder(subsubdir, meta_list, skip_constant: bool):
+    x, y = load_xy(subsubdir)  # HxW
+    # z = y - x  # HxW; Residual
+
+    if skip_constant:
+        if torch.allclose(y - y.mean(), 0.0):  # Constant GT wildfire texture?
+            return  # Skip
 
     x = TF.normalize(x[None,...], x.mean(), x.std())[0]  # HxW
     y = TF.normalize(y[None,...], y.mean(), y.std())[0]  # HxW
@@ -59,14 +61,14 @@ def process_folder(subsubdir, meta_list):
     })
 
 
-def process_with_threads(root: Path):
+def process_with_threads(root: Path, skip_constant: bool):
     meta_path = root.parent / f"{root.name}.json" 
     print(f"Meta path: {meta_path}")
 
     meta_list = []
     subsubdirs = find_folders(root)
 
-    worker = partial(process_folder, meta_list=meta_list)
+    worker = partial(process_folder, meta_list=meta_list, skip_constant=skip_constant)
     with ThreadPoolExecutor(max_workers=2 * cpu_count()) as executor:
         futures = {executor.submit(worker, subsubdir): subsubdir for subsubdir in subsubdirs}
         for future in tqdm(as_completed(futures), total=len(futures), desc="Processing"):
@@ -80,14 +82,20 @@ def process_with_threads(root: Path):
     
 
 if __name__ == "__main__":
-    root = Path("/mnt/data/wildfire/IR/Batch-1")
-    # process_with_threads(root)
+    import argparse
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", default="C:/IR/data/Batch-1", type=Path)
+    parser.add_argument("--skip_constant", action="store_true")  # Constant GT wildfire textures?
+    args = parser.parse_args()
+    
+    process_with_threads(args.root, args.skip_constant)
 
-    meta_path = root.parent / f"{root.name}.json"
+    meta_path = args.root.parent / f"{args.root.name}.json"
     with open(meta_path, "r") as fp:
         meta_list = json.load(fp)
 
-    subsubdirs = find_folders(root)
+    subsubdirs = find_folders(args.root)
     n_total = len(subsubdirs)
     n_non_skipped = len(meta_list)
     print(f"Data utilization: {100 * n_non_skipped / n_total}%")

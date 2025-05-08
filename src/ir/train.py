@@ -2,24 +2,17 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 import torch.optim as optim
-import torchvision.transforms as transforms
-import torchvision.datasets as datasets
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms.functional as TF
-import torchvision.utils as vutils
-import os
 from omegaconf import OmegaConf
 from dataclasses import dataclass, field
 import numpy as np
 import random
 from pathlib import Path
-from PIL import Image
 import cv2
 from tqdm import tqdm
-import matplotlib.pyplot as plt
-import json
 from multiprocessing import cpu_count
 import math 
 import sys
@@ -58,7 +51,7 @@ class ModelConf:
 
 @dataclass
 class DataConf:
-    meta_path: Path = Path("/mnt/data/wildfire/IR/Batch-1.json")
+    meta_path: Path = Path("C:/IR/data/Batch-1.json")
     val_split: float = 0.1
     key: str = "area_07"
     threshold: float = 0.33
@@ -67,14 +60,14 @@ class DataConf:
 @dataclass
 class TrainConf:
     seed: int = 42
-    device: str = "cpu"  # TODO: Check if GPUs are free!
+    device: str = "cuda"
     warmup_steps: int = 500
     train_steps: int = 4500
     log_every: int = 50  # [steps]
     vis_every: int = 500  # [steps]
     val_every: int = 5  # [epochs]
     log_n_images: int = 4
-    train_batch_size: int = 2
+    train_batch_size: int = 16
     eval_batch_size: int = 32
     learning_rate: float = 1e-3
     min_learning_rate: float = 1e-5
@@ -82,11 +75,15 @@ class TrainConf:
     beta1: float = 0.9
     beta2: float = 0.99
     gradient_clip_val: float = 1.0
-    num_workers: int = cpu_count()
+    num_workers: int = 0
+    # If use_ssim is False then we penalize the model if it is not
+    # able to hallucinate the hidden, never seen, wildfires on the ground.
+    # Otherwise, if use_ssim is True we penalize structural similar
+    # areas more between GT and AOS, thus emphasising areas that could be corrected.
+    use_ssim: bool = False
     model: ModelConf = field(default_factory=ModelConf)
     data: DataConf = field(default_factory=DataConf)
-    runs: Path = Path("/mnt/data/wildfire/IR/runs/autoencoder")
-    checkpoints: Path = Path("/mnt/data/wildfire/IR/checkpoints/autoencoder")
+    runs: Path = Path("C:/IR/runs/autoencoder")
 
 
 def create_grid(ncol: int, *imgs_list: list[Tensor], colormaps=None):
@@ -104,12 +101,32 @@ def create_grid(ncol: int, *imgs_list: list[Tensor], colormaps=None):
 
 class Criterion(nn.Module):
 
-    def __init__(self, win_size: int):
+    def __init__(self, win_size: int = 7, use_ssim: bool = True):
         super().__init__()
         self.mse = nn.MSELoss()
+        self.use_ssim = use_ssim
         self.ssim = SSIM(win_size=win_size)
         self._last_ssim = None
 
+    @torch.no_grad()
+    def get_ssim(self, aos: Tensor, gt: Tensor) -> Tensor:
+        x = TF.normalize(aos, aos.mean(), aos.std())  # Bx1xHxW
+        y = TF.normalize(gt, gt.mean(), gt.std())  # Bx1xHxW
+        
+        gmax = float(torch.max(x.max(), y.max()))
+        gmin = float(torch.min(x.min(), y.min()))
+        dxy = gmax - gmin
+
+        # More similar regions should be punished more if incorrect.
+        ssim = self.ssim(
+            x, y,
+            data_range=dxy,
+            nonnegative_ssim=True,
+            size_average=False
+        )
+        self._last_ssim = ssim  # For visualization purpose.
+        return ssim  # Bx1xHxW
+    
     def forward(
         self,
         res: Tensor,
@@ -124,26 +141,41 @@ class Criterion(nn.Module):
         aos ... input of our model, distorted by AOS
         gt ... if AOS would be error free
         """
-        with torch.no_grad():
-            x = TF.normalize(aos, aos.mean(), aos.std())  # Bx1xHxW
-            y = TF.normalize(gt, gt.mean(), gt.std())[0]  # Bx1xHxW
-            
-            gmax = float(torch.max(x.max(), y.max()))
-            gmin = float(torch.min(x.min(), y.min()))
-            dxy = gmax - gmin
-
-            # More similar regions should be punished more if incorrect.
-            ssim = self.ssim(data_range=dxy, nonnegative_ssim=True, size_average=False)
-            self._last_ssim = ssim  # For visualization purpose.
-
         mse = self.mse(res, tgt)
-        loss = (ssim * mse).sum() / (ssim.sum() + 1e-5)  # TODO or .mean() ??
+
+        if self.use_ssim:  # Try to avoid hallucinations with SSIM weighting.
+            ssim = self.get_ssim(aos, gt)
+            # TODO: Which is better?
+            loss = (ssim * mse).sum() / (ssim.sum() + 1e-5)
+            # loss = (ssim * mse).mean()
+        else:  # Try to guess hidden structures, force hallucinations.
+            loss = mse.mean()
+        
         return loss
         
 
 if __name__ == "__main__":
     """
     python -m src.ir.train
+
+    Hyperparameters subject to experiments (mark improvements with + or -):
+
+    [] "skip_constant" in preprocess.py  TODO!!!
+    [-] "use_ssim" in criterion
+    [++] "num_cond_embed" in model
+    [-] "gated" in model
+
+    # TODO delete haecker folder to free disk space, is now on vcnas
+
+    Epoch 61/71, Train Loss: 0.0962, Val Loss: 0.1623
+    
+    TODO
+    [] Rework visualizations: aos, aos+res, gt to see diff. and use same min max temp for tone maps 
+    [] Penalty on resulting image not residual, but model predicts residual.
+    [] Model directly predict result, not residuals.
+    [] GAN loss, perceptual loss etc as in VMambaIR and VQGAN.
+    [] More channel width in model?
+    [] UNet like skip connections in model?
     """
     conf = OmegaConf.merge(
         OmegaConf.structured(TrainConf()),
@@ -151,15 +183,15 @@ if __name__ == "__main__":
     )
     setup_torch(conf.seed)
 
-    time_now = str(time.strftime('%Y-%m-%d_%H-%M-%S'))
-
-    conf.runs = conf.runs / time_now
+    conf.runs = conf.runs / str(time.strftime('%Y-%m-%d_%H-%M-%S'))
     print(f"Logging runs to: {conf.runs}")
     conf.runs.mkdir(parents=True, exist_ok=True)
 
-    conf.checkpoints = conf.checkpoints / time_now
-    print(f"Saving checkpoints at: {conf.checkpoints}")
-    conf.checkpoints.mkdir(parents=True, exist_ok=True)
+    checkpoints = conf.runs / "checkpoints"
+    print(f"Saving checkpoints at: {checkpoints}")
+    checkpoints.mkdir(parents=True, exist_ok=True)
+
+    OmegaConf.save(conf, checkpoints / "conf.yaml")
 
     # Load dataset
     dataset, val_dataset = AOSDataset(
@@ -232,7 +264,10 @@ if __name__ == "__main__":
     accelerator = Accelerator(cpu=conf.device == "cpu")
     writer = SummaryWriter(conf.runs)
 
-    criterion = Criterion(win_size=7).to(accelerator.device)
+    # NOTE: The validation metric we use is the MSE weighted with
+    # structural similarity between GT and AOS temperatures.
+    criterion = Criterion(use_ssim=conf.use_ssim).to(accelerator.device)
+    val_criterion = Criterion(use_ssim=True).to(accelerator.device)
 
     # Prepare everything with Accelerator
     model, optimizer, dataloader, val_dataloader = accelerator.prepare(
@@ -296,21 +331,24 @@ if __name__ == "__main__":
                 
                 if global_step % conf.vis_every == 0:
                     residual = residual_normalized * tgt_std + tgt_mean
-                    grid = create_grid(
-                        conf.log_n_images,
+                    
+                    imgs_list = [
                         (aos + residual).detach().cpu(),
                         gt.cpu(),
                         residual.detach().cpu(),
                         tgt.cpu(),
-                        criterion._last_ssim.cpu(),
-                        colormaps=[
-                            cv2.COLORMAP_INFERNO,
-                            cv2.COLORMAP_INFERNO,
-                            cv2.COLORMAP_JET,
-                            cv2.COLORMAP_JET,
-                            cv2.COLORMAP_VIRIDIS,
-                        ],
-                    )
+                    ]
+                    colormaps = [
+                        cv2.COLORMAP_INFERNO,
+                        cv2.COLORMAP_INFERNO,
+                        cv2.COLORMAP_JET,
+                        cv2.COLORMAP_JET,
+                    ]
+                    if criterion.use_ssim:
+                        imgs_list.append(criterion._last_ssim.cpu())
+                        colormaps.append(cv2.COLORMAP_VIRIDIS)
+                        
+                    grid = create_grid(conf.log_n_images, *imgs_list, colormaps=colormaps)
                     writer.add_image(
                         "train/aos_gt_residual_tgt",
                         np.asarray(grid),
@@ -343,14 +381,14 @@ if __name__ == "__main__":
                             residual_normalized = model(aos_normalized, et)
                         else:
                             residual_normalized = model(aos_normalized)
-                        val_loss += criterion(residual_normalized, tgt_normalized, aos, gt).item()
+                        val_loss += val_criterion(residual_normalized, tgt_normalized, aos, gt).item()
                         
                 avg_val_loss = val_loss / len(val_dataloader)
                 writer.add_scalar("val/avg_loss", avg_val_loss, epoch)
                 
                 if avg_val_loss < best_val_loss:  # Save best model
                     best_val_loss = avg_val_loss
-                    torch.save(model.state_dict(), conf.checkpoints / "best.pth")
+                    torch.save(model.state_dict(), checkpoints / "best.pth")
                 
                 residual = residual_normalized * tgt_std + tgt_mean
                 grid = create_grid(
@@ -359,7 +397,7 @@ if __name__ == "__main__":
                     gt.cpu(),
                     residual.detach().cpu(),
                     tgt.cpu(),
-                    criterion._last_ssim.cpu(),
+                    val_criterion._last_ssim.cpu(),
                     colormaps=[
                         cv2.COLORMAP_INFERNO,
                         cv2.COLORMAP_INFERNO,
