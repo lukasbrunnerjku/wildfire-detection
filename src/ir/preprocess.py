@@ -27,7 +27,7 @@ def process_folder(subsubdir, meta_list, skip_constant: bool):
     # z = y - x  # HxW; Residual
 
     if skip_constant:
-        if torch.allclose(y - y.mean(), 0.0):  # Constant GT wildfire texture?
+        if torch.allclose(y, y.mean()):  # Constant GT wildfire texture?
             return  # Skip
 
     x = TF.normalize(x[None,...], x.mean(), x.std())[0]  # HxW

@@ -160,14 +160,11 @@ if __name__ == "__main__":
 
     Hyperparameters subject to experiments (mark improvements with + or -):
 
-    [] "skip_constant" in preprocess.py  TODO!!!
+    [+] "skip_constant" in preprocess.py  (+ because, on par but without const. harder task)
     [-] "use_ssim" in criterion
     [++] "num_cond_embed" in model
     [-] "gated" in model
 
-    # TODO delete haecker folder to free disk space, is now on vcnas
-
-    Epoch 61/71, Train Loss: 0.0962, Val Loss: 0.1623
     
     TODO
     [] Rework visualizations: aos, aos+res, gt to see diff. and use same min max temp for tone maps 
@@ -267,7 +264,7 @@ if __name__ == "__main__":
     # NOTE: The validation metric we use is the MSE weighted with
     # structural similarity between GT and AOS temperatures.
     criterion = Criterion(use_ssim=conf.use_ssim).to(accelerator.device)
-    val_criterion = Criterion(use_ssim=True).to(accelerator.device)
+    val_criterion = Criterion(use_ssim=False).to(accelerator.device)  # TODO: T or F?
 
     # Prepare everything with Accelerator
     model, optimizer, dataloader, val_dataloader = accelerator.prepare(
