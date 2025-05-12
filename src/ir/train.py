@@ -72,7 +72,7 @@ class TrainConf:
     train_batch_size: int = 16
     eval_batch_size: int = 32
     learning_rate: float = 1e-3
-    min_learning_rate: float = 1e-6  # 1e-5 TODO
+    min_learning_rate: float = 1e-6
     weight_decay: float = 1e-2
     beta1: float = 0.9
     beta2: float = 0.99
@@ -83,8 +83,8 @@ class TrainConf:
     # Otherwise, if use_ssim is True we penalize structural similar
     # areas more between GT and AOS, thus emphasising areas that could be corrected.
     use_ssim: bool = False
-    residual_target: bool = False  # TODO: better with True
-    normalize_residual: bool = False  # ??? TODO
+    residual_target: bool = True
+    normalize_residual: bool = False
     decay_groups: bool = False
     model: ModelConf = field(default_factory=ModelConf)
     data: DataConf = field(default_factory=DataConf)
@@ -247,7 +247,7 @@ if __name__ == "__main__":
     """
     python -m src.ir.train
 
-    Hyperparameters subject to experiments (mark improvements with + or -):
+    Hyperparameters subject to experiments (mark improvements with + or - or close to equal ~):
 
     [+] "skip_constant" in preprocess.py  (+ because, on par but without const. harder task)
     [-] "use_ssim" in criterion
@@ -255,15 +255,16 @@ if __name__ == "__main__":
     [-] "gated" in model
     [x] update visuals in tensorboard
     [++] norm stats over total training data
-    [~-] weight decay not on norms, bias, embeddings
-    [~-] penalty on image not residual, but model predicts residual
-    [] predict unnormalized residuals
+    [~] weight decay not on norms, bias, embeddings
+    [~] penalty on image not residual, but model predicts residual
+    [~] predict unnormalized residuals
+
+    [] UNet?
+    [] More channel width in model?
 
     TODO
-    [] Model directly predict result, not residuals.
     [] GAN loss, perceptual loss etc as in VMambaIR and VQGAN.
-    [] More channel width in model?
-    [] UNet like skip connections in model?
+    
     """
     conf = OmegaConf.merge(
         OmegaConf.structured(TrainConf()),
