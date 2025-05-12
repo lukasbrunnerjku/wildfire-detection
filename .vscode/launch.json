@@ -21,7 +21,10 @@
             "name": "preprocess",
             "type": "debugpy",
             "request": "launch",
-            "module": "src.ir.preprocess"
+            "module": "src.ir.preprocess",
+            "args": [
+                "--skip_constant"
+            ]
         },
         {
             "name": "data",
