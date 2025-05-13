@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from typing import Optional
 
-from norms import AdaGroupNorm, get_activation
+from .norms import AdaGroupNorm, get_activation
     
 
 class ResBlock(nn.Module):

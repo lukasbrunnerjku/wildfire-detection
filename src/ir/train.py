@@ -21,6 +21,7 @@ import json
 from typing import Optional
 
 from .ae import Autoencoder
+from .unet import UNet
 from .data import AOSDataset
 from .similarity import SSIM
 from ..utils.image import tone_mapping, pil_make_grid
@@ -49,6 +50,7 @@ class ModelConf:
     # Num. of different env. temp. but
     # if set to 0 => no conditioning used.
     num_cond_embed: int = 31
+    unet: bool = True
 
 
 @dataclass
@@ -69,8 +71,8 @@ class TrainConf:
     vis_every: int = 500  # [steps]
     val_every: int = 5  # [epochs]
     log_n_images: int = 4
-    train_batch_size: int = 16
-    eval_batch_size: int = 32
+    train_batch_size: int = 8
+    eval_batch_size: int = 16
     learning_rate: float = 1e-3
     min_learning_rate: float = 1e-6
     weight_decay: float = 1e-2
@@ -330,18 +332,38 @@ if __name__ == "__main__":
     )
 
     # Initialize model, loss function, and optimizer
-    if conf.model.gated:
-        from .gated import Conv2d, ConvTranspose2d
+    if conf.model.unet:
+        if conf.model.num_cond_embed > 0:
+            model = UNet(
+                in_channels=1,
+                out_channels=1,
+                down_block_types=["KDownBlock2D", "KDownBlock2D", "KDownBlock2D"],
+                up_block_types=["KUpBlock2D", "KUpBlock2D", "KUpBlock2D"],
+                block_out_channels=[32, 64, 128],
+                num_class_embeds=conf.model.num_cond_embed,
+                resnet_time_scale_shift="ada_group",
+            )
+        else:
+            model = UNet(
+                in_channels=1,
+                out_channels=1,
+                down_block_types=["DownBlock2D", "DownBlock2D", "DownBlock2D"],
+                up_block_types=["UpBlock2D", "UpBlock2D", "UpBlock2D"],
+                block_out_channels=[32, 64, 128],
+            )
     else:
-        from torch.nn import Conv2d, ConvTranspose2d
-        
-    kwargs = {k: v for k, v in conf.model.items() if k != "gated"}
-    model = Autoencoder(
-        in_channel=1,
-        conv_cls=Conv2d,
-        conv_transpose_cls=ConvTranspose2d,
-        **kwargs,
-    )
+        if conf.model.gated:
+            from .gated import Conv2d, ConvTranspose2d
+        else:
+            from torch.nn import Conv2d, ConvTranspose2d
+            
+        kwargs = {k: v for k, v in conf.model.items() if k != "gated"}
+        model = Autoencoder(
+            in_channel=1,
+            conv_cls=Conv2d,
+            conv_transpose_cls=ConvTranspose2d,
+            **kwargs,
+        )
 
     if conf.decay_groups:
         print("Norms, bias, and embeddings will exclude weight decay.")
@@ -376,7 +398,7 @@ if __name__ == "__main__":
     )
 
     # Initialize Accelerator and TensorBoard writer
-    accelerator = Accelerator(cpu=conf.device == "cpu")
+    accelerator = Accelerator(cpu=conf.device == "cpu", mixed_precision="fp16")
     writer = SummaryWriter(conf.runs)
 
     # NOTE: The validation metric we use is the MSE weighted with
