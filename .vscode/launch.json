@@ -37,6 +37,13 @@
             "type": "debugpy",
             "request": "launch",
             "module": "src.ir.ae"
-        }
+        },
+        {
+            "name": "unet",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.ir.unet",
+            "justMyCode": false
+        },
     ]
 }

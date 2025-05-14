@@ -13,18 +13,18 @@ import random
 from pathlib import Path
 import cv2
 from tqdm import tqdm
-from multiprocessing import cpu_count
 import math 
 import sys
 import time
 import json
 from typing import Optional
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
 from .ae import Autoencoder
 from .unet import UNet
 from .data import AOSDataset
 from .similarity import SSIM
-from ..utils.image import tone_mapping, pil_make_grid
+from ..utils.image import tone_mapping, pil_make_grid, to_zero_one_range
 from ..utils.weight_decay import weight_decay_parameter_split
 
 
@@ -50,7 +50,7 @@ class ModelConf:
     # Num. of different env. temp. but
     # if set to 0 => no conditioning used.
     num_cond_embed: int = 31
-    unet: bool = True
+    unet: bool = False
 
 
 @dataclass
@@ -66,7 +66,7 @@ class TrainConf:
     seed: int = 42
     device: str = "cuda"
     warmup_steps: int = 500
-    train_steps: int = 4500
+    train_steps: int = 9500
     log_every: int = 50  # [steps]
     vis_every: int = 500  # [steps]
     val_every: int = 5  # [epochs]
@@ -84,10 +84,11 @@ class TrainConf:
     # able to hallucinate the hidden, never seen, wildfires on the ground.
     # Otherwise, if use_ssim is True we penalize structural similar
     # areas more between GT and AOS, thus emphasising areas that could be corrected.
-    use_ssim: bool = False
+    use_ssim: bool = False  # best with False but TODO check again since last time was buggy
     residual_target: bool = True
     normalize_residual: bool = False
     decay_groups: bool = False
+    predict_image: bool = True  # otherwise residual TODO was False before
     model: ModelConf = field(default_factory=ModelConf)
     data: DataConf = field(default_factory=DataConf)
     runs: Path = Path("C:/IR/runs/autoencoder")
@@ -114,7 +115,37 @@ def create_grid(
     return grid
 
 
-class Criterion(nn.Module):
+class ImageCriterion(nn.Module):
+
+    def __init__(
+        self,
+        aos_mean: Optional[float] = None,
+        aos_std: Optional[float] = None,
+    ):
+        super().__init__()
+        self.aos_mean = aos_mean
+        self.aos_std = aos_std
+        self.mse = nn.MSELoss(reduction="none")
+
+    def forward(
+        self,
+        pred_img_norm: Tensor,
+        aos: Tensor,
+        gt: Tensor,
+    ):
+        """
+        All arguments of shape Bx1xHxW.
+        pred_img_norm ... normalized output image of model
+        aos ... input of our model, distorted by AOS
+        gt ... if AOS would be error free
+        """
+        pred_img = self.aos_std * pred_img_norm + self.aos_mean
+        mse = self.mse(pred_img, gt)
+        loss = mse.mean()
+        return loss
+    
+
+class ResidualCriterion(nn.Module):
 
     def __init__(
         self,
@@ -122,18 +153,14 @@ class Criterion(nn.Module):
         use_ssim: bool = True,
         residual_target: bool = True,
         normalize_residual: bool = True,
-        aos_mean: Optional[float] = None,
-        aos_std: Optional[float] = None,
         res_mean: Optional[float] = None,
         res_std: Optional[float] = None,
     ):
         super().__init__()
-        self.mse = nn.MSELoss()
+        self.mse = nn.MSELoss(reduction="none")
         self.use_ssim = use_ssim
         self.residual_target = residual_target
         self.normalize_residual = normalize_residual
-        self.aos_mean = aos_mean
-        self.aos_std = aos_std
         self.res_mean = res_mean
         self.res_std = res_std
         self.ssim = SSIM(win_size=win_size)
@@ -161,7 +188,7 @@ class Criterion(nn.Module):
         pred_res: Tensor,
         aos: Tensor,
         gt: Tensor,
-    ):  # 
+    ):
         """
         All arguments of shape Bx1xHxW.
         pred_res ... output residual of model
@@ -245,6 +272,53 @@ def get_mean_std(dl: DataLoader):
     }
 
 
+class Metrics(nn.Module):
+
+    def __init__(self, ):
+        super().__init__()
+        self.psnr = PeakSignalNoiseRatio(data_range=1.0)
+        self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
+
+    def update(self, preds: Tensor, target: Tensor) -> None:
+        new_preds = []
+        new_target = []
+        for p, t in zip(preds, target):
+            min_t, max_t = t.min(), t.max()
+            p = to_zero_one_range(p, min=min_t, max=max_t)
+            t = to_zero_one_range(t , min=min_t, max=max_t)
+            new_preds.append(p)
+            new_target.append(t)
+        
+        new_preds = torch.stack(new_preds, 0)
+        new_target = torch.stack(new_target, 0)
+
+        self.psnr.update(new_preds, new_target)
+        self.ssim.update(new_preds, new_target)
+
+    def compute(self):
+        return {
+            "psnr": self.psnr.compute(),
+            "ssim": self.ssim.compute(),
+        }
+    
+    def reset(self):
+        self.psnr.reset()
+        self.ssim.reset()
+
+
+def to_image(pred_res_or_img, aos, aos_std, aos_mean, conf):
+    """Model output and configuration. Build prediction image."""
+    if conf.predict_image:
+        pred = aos_std * pred_res_or_img + aos_mean
+    else:
+        if conf.normalize_residual:
+            pred = res_std * pred_res_or_img + res_mean + aos
+        else:
+            pred = pred_res_or_img + aos
+    
+    return pred
+
+
 if __name__ == "__main__":
     """
     python -m src.ir.train
@@ -252,7 +326,6 @@ if __name__ == "__main__":
     Hyperparameters subject to experiments (mark improvements with + or - or close to equal ~):
 
     [+] "skip_constant" in preprocess.py  (+ because, on par but without const. harder task)
-    [-] "use_ssim" in criterion
     [++] "num_cond_embed" in model
     [-] "gated" in model
     [x] update visuals in tensorboard
@@ -260,11 +333,20 @@ if __name__ == "__main__":
     [~] weight decay not on norms, bias, embeddings
     [~] penalty on image not residual, but model predicts residual
     [~] predict unnormalized residuals
+    [~+] train batch size 8 instead of 16 & AMP & double steps (to have seen same amount of data)
+    [--] UNet stride 4 with condition
+    [---] let model predict image directly instead of residual prediction
+    [] "use_ssim" in criterion
 
-    [] UNet?
-    [] More channel width in model?
+    # TODO: still a bug in model prediction direct image? visu seem worse but metric better???
+
+    [] is unet better suited if predicting image directly instead of residual?
+    [] UNet stride 4 without condition
+    [] UNet stride 16 with condition
+    [] UNet stride 16 without condition
 
     TODO
+    [] SSIM and PSNR on tone mapped images to be compatible with other IR methods
     [] GAN loss, perceptual loss etc as in VMambaIR and VQGAN.
     
     """
@@ -339,7 +421,8 @@ if __name__ == "__main__":
                 out_channels=1,
                 down_block_types=["KDownBlock2D", "KDownBlock2D", "KDownBlock2D"],
                 up_block_types=["KUpBlock2D", "KUpBlock2D", "KUpBlock2D"],
-                block_out_channels=[32, 64, 128],
+                # block_out_channels=[32, 64, 128],  # stride 4
+                block_out_channels=[16, 32, 64, 96, 128],  # stride 16
                 num_class_embeds=conf.model.num_cond_embed,
                 resnet_time_scale_shift="ada_group",
             )
@@ -349,7 +432,8 @@ if __name__ == "__main__":
                 out_channels=1,
                 down_block_types=["DownBlock2D", "DownBlock2D", "DownBlock2D"],
                 up_block_types=["UpBlock2D", "UpBlock2D", "UpBlock2D"],
-                block_out_channels=[32, 64, 128],
+                # block_out_channels=[32, 64, 128],  # stride 4
+                block_out_channels=[16, 32, 64, 96, 128],  # stride 16
             )
     else:
         if conf.model.gated:
@@ -357,7 +441,7 @@ if __name__ == "__main__":
         else:
             from torch.nn import Conv2d, ConvTranspose2d
             
-        kwargs = {k: v for k, v in conf.model.items() if k != "gated"}
+        kwargs = {k: v for k, v in conf.model.items() if k not in ("gated", "unet")}
         model = Autoencoder(
             in_channel=1,
             conv_cls=Conv2d,
@@ -403,24 +487,29 @@ if __name__ == "__main__":
 
     # NOTE: The validation metric we use is the MSE weighted with
     # structural similarity between GT and AOS temperatures.
-    criterion = Criterion(
-        use_ssim=conf.use_ssim,
-        residual_target=conf.residual_target,
-        normalize_residual=conf.normalize_residual,
-        aos_mean=aos_mean,
-        aos_std=aos_std,
-        res_mean=res_mean,
-        res_std=res_std,
-    ).to(accelerator.device)
-    val_criterion = Criterion(
+    if conf.predict_image:
+        criterion = ImageCriterion(
+            aos_mean=aos_mean,
+            aos_std=aos_std,
+        ).to(accelerator.device)
+    else:
+        criterion = ResidualCriterion(
+            use_ssim=conf.use_ssim,
+            residual_target=conf.residual_target,
+            normalize_residual=conf.normalize_residual,
+            res_mean=res_mean,
+            res_std=res_std,
+        ).to(accelerator.device)
+
+    val_criterion = ResidualCriterion(
         use_ssim=True,
         residual_target=True,
         normalize_residual=True,
-        aos_mean=aos_mean,
-        aos_std=aos_std,
         res_mean=res_mean,
         res_std=res_std,
-    ).to(accelerator.device)  # Keep those for ablation experiments.
+    ).to(accelerator.device)  # Keep this as metric for ablation experiments.
+
+    metrics = Metrics().to(accelerator.device)
 
     # Prepare everything with Accelerator
     model, optimizer, dataloader, val_dataloader = accelerator.prepare(
@@ -450,17 +539,20 @@ if __name__ == "__main__":
                 if model.embedding is not None:
                     # Env. temp. as cond
                     # NOTE: Only working with env. temp. from 0 to Tmax (integers)
-                    pred_res = model(aos_normalized, et)
+                    pred_res_or_img = model(aos_normalized, et)
                 else:
-                    pred_res = model(aos_normalized)
+                    pred_res_or_img = model(aos_normalized)
 
-                loss = criterion(pred_res, aos, gt)
+                loss = criterion(pred_res_or_img, aos, gt)
                 
                 accelerator.backward(loss)
                 optimizer.step()
                 lr_scheduler.step()
                 
                 total_loss += loss.item()
+
+                pred = to_image(pred_res_or_img.detach(), aos, aos_std, aos_mean, conf)
+                metrics.update(pred, gt)
 
                 if global_step % conf.log_every == 0:
                     lr = optimizer.param_groups[0]["lr"]
@@ -470,10 +562,7 @@ if __name__ == "__main__":
                     })
                 
                 if global_step % conf.vis_every == 0:
-                    if criterion.normalize_residual:
-                        pred = res_std * pred_res + res_mean + aos
-                    else:
-                        pred = pred_res + aos
+                    pred = to_image(pred_res_or_img, aos, aos_std, aos_mean, conf)
 
                     grid = create_grid(
                         conf.log_n_images,
@@ -491,10 +580,13 @@ if __name__ == "__main__":
                         dataformats="HWC",
                     )
 
-                    if criterion.normalize_residual:
-                        residual = res_std * pred_res + res_mean
+                    if conf.predict_image:
+                        residual = gt - (aos_std * pred_res_or_img + aos_mean)
                     else:
-                        residual = pred_res
+                        if conf.normalize_residual:
+                            residual = res_std * pred_res_or_img + res_mean
+                        else:
+                            residual = pred_res_or_img
 
                     tgt = gt - aos
                     grid = create_grid(
@@ -521,6 +613,11 @@ if __name__ == "__main__":
             avg_train_loss = total_loss / len(dataloader)
             writer.add_scalar("train/avg_loss", avg_train_loss, epoch)
 
+            r = metrics.compute()
+            writer.add_scalar("train/psnr", r["psnr"].item(), epoch)
+            writer.add_scalar("train/ssim", r["ssim"].item(), epoch)
+            metrics.reset()
+
             if epoch % conf.val_every == 0:
                 model.eval()
                 val_loss = 0
@@ -533,18 +630,30 @@ if __name__ == "__main__":
                         aos_normalized = (aos - aos_mean) / aos_std
 
                         if model.embedding is not None:
-                            pred_res = model(aos_normalized, et)
+                            pred_res_or_img = model(aos_normalized, et)
                         else:
-                            pred_res = model(aos_normalized)
+                            pred_res_or_img = model(aos_normalized)
 
-                        if not criterion.normalize_residual:
-                            # NOTE: Validation loss expects normalized residuals.
-                            pred_res = (pred_res - res_mean) / res_std
+                        pred = to_image(pred_res_or_img, aos, aos_std, aos_mean, conf)
+                        metrics.update(pred, gt)
+
+                        if conf.predict_image:
+                            pred_res = gt - (aos_std * pred_res_or_img + aos_mean)
+                            pred_res = (pred_res - res_mean) / res_std  # normalized now
+                        else:
+                            if not conf.normalize_residual:
+                                # NOTE: Validation loss expects normalized residuals.
+                                pred_res = (pred_res_or_img - res_mean) / res_std
 
                         val_loss += val_criterion(pred_res, aos, gt).item()
                         
                 avg_val_loss = val_loss / len(val_dataloader)
                 writer.add_scalar("val/avg_loss", avg_val_loss, epoch)
+
+                r = metrics.compute()
+                writer.add_scalar("val/psnr", r["psnr"].item(), epoch)
+                writer.add_scalar("val/ssim", r["ssim"].item(), epoch)
+                metrics.reset()
                 
                 if avg_val_loss < best_val_loss:  # Save best model
                     best_val_loss = avg_val_loss

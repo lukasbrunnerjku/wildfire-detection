@@ -167,12 +167,18 @@ class SSIM(nn.Module):
         win_sigma: float = 1.5,
         win: Optional[Tensor] = None,
         K: tuple[float, float] = (0.01, 0.03),
+        same: bool = True,
     ):
         super().__init__()
         self.win_size = win_size
         self.win_sigma = win_sigma
         self.win = win
         self.K = K
+        
+        self.pad = None
+        if same:
+            p = int((win_size - 1) / 2)
+            self.pad = (p, p, p, p)
 
     def forward(
         self,
@@ -182,6 +188,10 @@ class SSIM(nn.Module):
         size_average: bool = True,
         nonnegative_ssim: bool = False,
     ):
+        if self.pad is not None:
+            x = F.pad(x, self.pad, mode="constant", value=x.mean())
+            y = F.pad(y, self.pad, mode="constant", value=y.mean())
+
         return ssim_torch(
             x,
             y,
