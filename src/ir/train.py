@@ -50,7 +50,7 @@ class ModelConf:
     # Num. of different env. temp. but
     # if set to 0 => no conditioning used.
     num_cond_embed: int = 31
-    unet: bool = False
+    unet: bool = True
 
 
 @dataclass
@@ -84,11 +84,11 @@ class TrainConf:
     # able to hallucinate the hidden, never seen, wildfires on the ground.
     # Otherwise, if use_ssim is True we penalize structural similar
     # areas more between GT and AOS, thus emphasising areas that could be corrected.
-    use_ssim: bool = False  # best with False but TODO check again since last time was buggy
-    residual_target: bool = True
-    normalize_residual: bool = False
+    use_ssim: bool = False
+    residual_target: bool = True  # NOTE: has no effect if predict_imag=True
+    normalize_residual: bool = False  # NOTE: has no effect if predict_imag=True
     decay_groups: bool = False
-    predict_image: bool = True  # otherwise residual TODO was False before
+    predict_image: bool = True
     model: ModelConf = field(default_factory=ModelConf)
     data: DataConf = field(default_factory=DataConf)
     runs: Path = Path("C:/IR/runs/autoencoder")
@@ -115,17 +115,39 @@ def create_grid(
     return grid
 
 
+@torch.no_grad()
+def get_ssim(model, aos: Tensor, gt: Tensor) -> Tensor:
+    """More similar regions should be punished more if incorrect."""
+    x = TF.normalize(aos, aos.mean(), aos.std())  # Bx1xHxW
+    y = TF.normalize(gt, gt.mean(), gt.std())  # Bx1xHxW
+
+    dxy = float(torch.max(x.max(), y.max())) - float(torch.min(x.min(), y.min()))
+
+    ssim = model(
+        x, y,
+        data_range=dxy,
+        nonnegative_ssim=True,
+        size_average=False
+    )
+    return ssim  # Bx1xHxW
+
+
 class ImageCriterion(nn.Module):
 
     def __init__(
         self,
+        win_size: int = 7,
+        use_ssim: bool = True,
         aos_mean: Optional[float] = None,
         aos_std: Optional[float] = None,
     ):
         super().__init__()
+        self.use_ssim = use_ssim
         self.aos_mean = aos_mean
         self.aos_std = aos_std
         self.mse = nn.MSELoss(reduction="none")
+        self.ssim = SSIM(win_size=win_size)
+        self._last_ssim = None
 
     def forward(
         self,
@@ -141,7 +163,14 @@ class ImageCriterion(nn.Module):
         """
         pred_img = self.aos_std * pred_img_norm + self.aos_mean
         mse = self.mse(pred_img, gt)
-        loss = mse.mean()
+        
+        if self.use_ssim:  # Try to avoid hallucinations with SSIM weighting.
+            ssim = get_ssim(self.ssim, aos, gt)
+            self._last_ssim = ssim  # For visualization purpose.
+            loss = (ssim * mse).sum() / (ssim.sum() + 1e-5)
+        else:  # Try to guess hidden structures, force hallucinations.
+            loss = mse.mean()
+
         return loss
     
 
@@ -165,23 +194,6 @@ class ResidualCriterion(nn.Module):
         self.res_std = res_std
         self.ssim = SSIM(win_size=win_size)
         self._last_ssim = None
-
-    @torch.no_grad()
-    def get_ssim(self, aos: Tensor, gt: Tensor) -> Tensor:
-        # More similar regions should be punished more if incorrect.
-        x = TF.normalize(aos, aos.mean(), aos.std())  # Bx1xHxW
-        y = TF.normalize(gt, gt.mean(), gt.std())  # Bx1xHxW
-
-        dxy = float(torch.max(x.max(), y.max())) - float(torch.min(x.min(), y.min()))
-
-        ssim = self.ssim(
-            x, y,
-            data_range=dxy,
-            nonnegative_ssim=True,
-            size_average=False
-        )
-        self._last_ssim = ssim  # For visualization purpose.
-        return ssim  # Bx1xHxW
     
     def forward(
         self,
@@ -211,8 +223,8 @@ class ResidualCriterion(nn.Module):
                 mse = self.mse(pred_img, gt)
 
         if self.use_ssim:  # Try to avoid hallucinations with SSIM weighting.
-            ssim = self.get_ssim(aos, gt)
-            # loss = (ssim * mse).mean()  TODO: Which is better?
+            ssim = get_ssim(self.ssim, aos, gt)
+            self._last_ssim = ssim  # For visualization purpose.
             loss = (ssim * mse).sum() / (ssim.sum() + 1e-5)
         else:  # Try to guess hidden structures, force hallucinations.
             loss = mse.mean()
@@ -319,6 +331,61 @@ def to_image(pred_res_or_img, aos, aos_std, aos_mean, conf):
     return pred
 
 
+def log_images(
+    writer,
+    global_step,
+    phase: str,
+    pred_res_or_img,
+    aos,
+    aos_std,
+    aos_mean,
+    gt,
+    conf,
+):
+    pred = to_image(pred_res_or_img, aos, aos_std, aos_mean, conf)
+
+    grid = create_grid(
+        conf.log_n_images,
+        aos.cpu(), pred.detach().cpu(), gt.cpu(),
+        colormaps=[
+            cv2.COLORMAP_INFERNO, cv2.COLORMAP_INFERNO, cv2.COLORMAP_INFERNO
+        ],
+        min=gt.min().cpu(),
+        max=gt.max().cpu(),
+    )
+    writer.add_image(
+        f"{phase}/images",
+        np.asarray(grid),
+        global_step,
+        dataformats="HWC",
+    )
+
+    if conf.predict_image:
+        residual = gt - pred
+    else:
+        if conf.normalize_residual:
+            residual = res_std * pred_res_or_img + res_mean
+        else:
+            residual = pred_res_or_img
+
+    tgt = gt - aos
+    grid = create_grid(
+        conf.log_n_images,
+        residual.detach().cpu(), tgt.cpu(),
+        colormaps=[
+            cv2.COLORMAP_JET, cv2.COLORMAP_JET,
+        ],
+        min=tgt.min().cpu(),
+        max=tgt.max().cpu(),
+    )
+    writer.add_image(
+        f"{phase}/residuals",
+        np.asarray(grid),
+        global_step,
+        dataformats="HWC",
+    )
+
+
 if __name__ == "__main__":
     """
     python -m src.ir.train
@@ -335,20 +402,16 @@ if __name__ == "__main__":
     [~] predict unnormalized residuals
     [~+] train batch size 8 instead of 16 & AMP & double steps (to have seen same amount of data)
     [--] UNet stride 4 with condition
-    [---] let model predict image directly instead of residual prediction
-    [] "use_ssim" in criterion
+    [---] let AE predict image directly instead of residual prediction TODO: buggy?
+    [--] "use_ssim" in criterion
+    [x] SSIM and PSNR on tone mapped images to be compatible with other IR methods
+    [-] unet with residual prediction
+    [] is unet better suited if predicting image directly instead of residual?
 
     # TODO: still a bug in model prediction direct image? visu seem worse but metric better???
 
-    [] is unet better suited if predicting image directly instead of residual?
-    [] UNet stride 4 without condition
-    [] UNet stride 16 with condition
-    [] UNet stride 16 without condition
-
     TODO
-    [] SSIM and PSNR on tone mapped images to be compatible with other IR methods
     [] GAN loss, perceptual loss etc as in VMambaIR and VQGAN.
-    
     """
     conf = OmegaConf.merge(
         OmegaConf.structured(TrainConf()),
@@ -415,25 +478,32 @@ if __name__ == "__main__":
 
     # Initialize model, loss function, and optimizer
     if conf.model.unet:
+        block_out_channels = [32, 32, 64, 64, 128]  # Stride 16
+
         if conf.model.num_cond_embed > 0:
+            # A NOTE on "block_out_channels", a
+            # channel below 32 would not work due to group norm of KDowblock2D in "get_down_block"
+            # receives not the number of groups as parameter instead uses always default of 32
+            # ie. 16 instead of 32 for first channel ==> ZeroDivisionError: integer division or modulo by zero 
+            # TODO: Even more customization required to make a more efficient yet powerfull UNet arch.
             model = UNet(
                 in_channels=1,
                 out_channels=1,
-                down_block_types=["KDownBlock2D", "KDownBlock2D", "KDownBlock2D"],
-                up_block_types=["KUpBlock2D", "KUpBlock2D", "KUpBlock2D"],
-                # block_out_channels=[32, 64, 128],  # stride 4
-                block_out_channels=[16, 32, 64, 96, 128],  # stride 16
+                down_block_types=["KDownBlock2D"] * len(block_out_channels),
+                up_block_types=["KUpBlock2D"] * len(block_out_channels),
+                block_out_channels=block_out_channels,  
                 num_class_embeds=conf.model.num_cond_embed,
                 resnet_time_scale_shift="ada_group",
+                norm_num_groups=16,
             )
         else:
             model = UNet(
                 in_channels=1,
                 out_channels=1,
-                down_block_types=["DownBlock2D", "DownBlock2D", "DownBlock2D"],
-                up_block_types=["UpBlock2D", "UpBlock2D", "UpBlock2D"],
-                # block_out_channels=[32, 64, 128],  # stride 4
-                block_out_channels=[16, 32, 64, 96, 128],  # stride 16
+                down_block_types=["DownBlock2D"] * len(block_out_channels),
+                up_block_types=["UpBlock2D"] * len(block_out_channels),
+                block_out_channels=block_out_channels,
+                norm_num_groups=16,
             )
     else:
         if conf.model.gated:
@@ -489,6 +559,12 @@ if __name__ == "__main__":
     # structural similarity between GT and AOS temperatures.
     if conf.predict_image:
         criterion = ImageCriterion(
+            use_ssim=conf.use_ssim,
+            aos_mean=aos_mean,
+            aos_std=aos_std,
+        ).to(accelerator.device)
+        val_criterion = ImageCriterion(
+            use_ssim=True,
             aos_mean=aos_mean,
             aos_std=aos_std,
         ).to(accelerator.device)
@@ -500,15 +576,15 @@ if __name__ == "__main__":
             res_mean=res_mean,
             res_std=res_std,
         ).to(accelerator.device)
+        val_criterion = ResidualCriterion(
+            use_ssim=True,
+            residual_target=conf.residual_target,
+            normalize_residual=conf.normalize_residual,
+            res_mean=res_mean,
+            res_std=res_std,
+        ).to(accelerator.device)  
 
-    val_criterion = ResidualCriterion(
-        use_ssim=True,
-        residual_target=True,
-        normalize_residual=True,
-        res_mean=res_mean,
-        res_std=res_std,
-    ).to(accelerator.device)  # Keep this as metric for ablation experiments.
-
+    # Metrics for ablation experiments.
     metrics = Metrics().to(accelerator.device)
 
     # Prepare everything with Accelerator
@@ -562,47 +638,16 @@ if __name__ == "__main__":
                     })
                 
                 if global_step % conf.vis_every == 0:
-                    pred = to_image(pred_res_or_img, aos, aos_std, aos_mean, conf)
-
-                    grid = create_grid(
-                        conf.log_n_images,
-                        aos.cpu(), pred.detach().cpu(), gt.cpu(),
-                        colormaps=[
-                            cv2.COLORMAP_INFERNO, cv2.COLORMAP_INFERNO, cv2.COLORMAP_INFERNO
-                        ],
-                        min=gt.min().cpu(),
-                        max=gt.max().cpu(),
-                    )
-                    writer.add_image(
-                        "train/images",
-                        np.asarray(grid),
+                    log_images(
+                        writer,
                         global_step,
-                        dataformats="HWC",
-                    )
-
-                    if conf.predict_image:
-                        residual = gt - (aos_std * pred_res_or_img + aos_mean)
-                    else:
-                        if conf.normalize_residual:
-                            residual = res_std * pred_res_or_img + res_mean
-                        else:
-                            residual = pred_res_or_img
-
-                    tgt = gt - aos
-                    grid = create_grid(
-                        conf.log_n_images,
-                        residual.detach().cpu(), tgt.cpu(),
-                        colormaps=[
-                            cv2.COLORMAP_JET, cv2.COLORMAP_JET,
-                        ],
-                        min=tgt.min().cpu(),
-                        max=tgt.max().cpu(),
-                    )
-                    writer.add_image(
-                        "train/residuals",
-                        np.asarray(grid),
-                        global_step,
-                        dataformats="HWC",
+                        "train",
+                        pred_res_or_img,
+                        aos,
+                        aos_std,
+                        aos_mean,
+                        gt,
+                        conf,
                     )
                 
                 pbar.update(1)
@@ -634,18 +679,10 @@ if __name__ == "__main__":
                         else:
                             pred_res_or_img = model(aos_normalized)
 
+                        val_loss += val_criterion(pred_res_or_img, aos, gt).item()
+
                         pred = to_image(pred_res_or_img, aos, aos_std, aos_mean, conf)
                         metrics.update(pred, gt)
-
-                        if conf.predict_image:
-                            pred_res = gt - (aos_std * pred_res_or_img + aos_mean)
-                            pred_res = (pred_res - res_mean) / res_std  # normalized now
-                        else:
-                            if not conf.normalize_residual:
-                                # NOTE: Validation loss expects normalized residuals.
-                                pred_res = (pred_res_or_img - res_mean) / res_std
-
-                        val_loss += val_criterion(pred_res, aos, gt).item()
                         
                 avg_val_loss = val_loss / len(val_dataloader)
                 writer.add_scalar("val/avg_loss", avg_val_loss, epoch)
@@ -659,47 +696,16 @@ if __name__ == "__main__":
                     best_val_loss = avg_val_loss
                     torch.save(model.state_dict(), checkpoints / "best.pth")
 
-                if val_criterion.normalize_residual:
-                    pred = res_std * pred_res + res_mean + aos
-                else:
-                    pred = pred_res + aos
-
-                grid = create_grid(
-                    conf.log_n_images,
-                    aos.cpu(), pred.detach().cpu(), gt.cpu(),
-                    colormaps=[
-                        cv2.COLORMAP_INFERNO, cv2.COLORMAP_INFERNO, cv2.COLORMAP_INFERNO
-                    ],
-                    min=gt.min().cpu(),
-                    max=gt.max().cpu(),
-                )
-                writer.add_image(
-                    "val/images",
-                    np.asarray(grid),
+                log_images(
+                    writer,
                     global_step,
-                    dataformats="HWC",
-                )
-
-                if val_criterion.normalize_residual:
-                    residual = res_std * pred_res + res_mean
-                else:
-                    residual = pred_res
-                    
-                tgt = gt - aos
-                grid = create_grid(
-                    conf.log_n_images,
-                    residual.detach().cpu(), tgt.cpu(),
-                    colormaps=[
-                        cv2.COLORMAP_JET, cv2.COLORMAP_JET,
-                    ],
-                    min=tgt.min().cpu(),
-                    max=tgt.max().cpu(),
-                )
-                writer.add_image(
-                    "val/residuals",
-                    np.asarray(grid),
-                    global_step,
-                    dataformats="HWC",
+                    "val",
+                    pred_res_or_img,
+                    aos,
+                    aos_std,
+                    aos_mean,
+                    gt,
+                    conf,
                 )
 
                 sys.stdout.flush()
