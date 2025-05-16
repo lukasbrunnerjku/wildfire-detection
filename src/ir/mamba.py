@@ -1,8 +1,6 @@
 """
 UVM-Net Code: https://github.com/zzr-idam/UVM-Net
 
-
-
 VmambaIR: https://arxiv.org/pdf/2403.11423 (no code yet)
 
 Educational Code Examples: https://github.com/alxndrTL/mamba.py
@@ -18,6 +16,8 @@ import torch.nn.functional as F
 # ---> REQUIRES LINUX <---
 # Mamba or Mamba2 ?
 from mamba_ssm import Mamba  # pip install mamba-ssm[causal-conv1d]
+
+from .scan import to_line_scanable_sequence
 
 
 class DConv(nn.Conv2d):
@@ -52,135 +52,52 @@ class EFFN(nn.Module):
         return x
 
 
-def to_line_scanable_sequence(x: Tensor, no_jump: bool, direction: str):
-    B, C, H, W = x.shape
-
-    """
-    Imagine H, W as y, x axes here.
-
-    0, 1, 2
-    3, 4, 5
-    6, 7, 8
-    """
-    if direction in ("h_forward", "h_backward"):
-        # h_forward: "...scanning from the top left to the bottom right"
-        if no_jump:
-            """
-            Along the sequence dimension L we would get
-            => 0, 1, 2, 5, 4, 3, 6, 7, 8
-            """
-            x = torch.stack([x[:, :, 0::2, :], x[:, :, 1::2, ::-1]], dim=3)  # BxCx(H/2)x2xW
-            x = x.reshape(B, C, -1).permute(0, 2, 1)  # BxLxC
-        else:
-            """
-            Along the sequence dimension L we would get
-            => 0, 1, 2, 3, 4, 5, 6, 7, 8
-            """
-            x = x.reshape(B, C, -1).permute(0, 2, 1)  # BxLxC
-        
-        if "h_backward":
-            """
-            Along the sequence dimension L we would get either
-            => 8, 7, 6, 3, 4, 5, 2, 1, 0 (every_2nd_row_in_reverse)
-            or
-            => 8, 7, 6, 5, 4, 3, 2, 1, 0
-            """
-            x = x[:, ::-1, :]  # BxLxC
-    
-    elif direction in ("w_forward", "w_backward"):
-        # w_forward: "...scanning from the bottom left to the top right"
-        if no_jump:
-            """
-            Starting from
-            0, 1, 2
-            3, 4, 5
-            6, 7, 8
-            and after permute
-            0, 3, 6
-            1, 4, 7
-            2, 5, 8
-
-            Along the sequence dimension L we would get
-            => 6, 3, 0, 1, 4, 7, 8, 5, 2
-            """
-            x = x.permute(0, 1, 3, 2)  # BxCxWxH
-            x = torch.stack([x[:, :, 0::2, ::-1], x[:, :, 1::2, :]], dim=3)  # BxCx(W/2)x2xH
-            x = x.reshape(B, C, -1).permute(0, 2, 1)  # BxLxC
-
-        else:
-            """
-            Starting from
-            0, 1, 2
-            3, 4, 5
-            6, 7, 8
-            and after permute
-            0, 3, 6
-            1, 4, 7
-            2, 5, 8
-            and after reverse in H dimension
-            6, 3, 0
-            7, 4, 1
-            8, 5, 2
-
-            Along the sequence dimension L we would get
-            => 6, 3, 0, 7, 4, 1, 8, 5, 2
-            """
-            x = x.permute(0, 1, 3, 2)  # BxCxWxH
-            x = x[:, :, :, ::-1]  # Reverse in H dimension
-            x = x.reshape(B, C, -1).permute(0, 2, 1)  # BxLxC
-
-        if "w_backward":
-            x = x[:, ::-1, :]  # BxLxC
-
-    else:
-        raise ValueError(f"Unknown {direction=}?")
-
-
-    return x
-    
-
 class OSS(nn.Module):
 
     def __init__(self, in_channels: int):
         """Omni Selective Scan (OSS)"""
         super().__init__()
-        self.h_forward_scan = Mamba(
+        self.mamba1 = Mamba(
             # This module uses roughly 3 * expand * d_model^2 parameters
-            d_model=in_channels, # Model dimension d_model
+            d_model=4 * in_channels, # Model dimension d_model
             d_state=16,  # SSM state expansion factor
             d_conv=4,    # Local convolution width
             expand=2,    # Block expansion factor
         )
-        self.h_backward_scan = Mamba(
+        self.mamba2 = Mamba(
             # This module uses roughly 3 * expand * d_model^2 parameters
-            d_model=in_channels, # Model dimension d_model
-            d_state=16,  # SSM state expansion factor
-            d_conv=4,    # Local convolution width
-            expand=2,    # Block expansion factor
-        )
-        self.w_forward_scan = Mamba(
-            # This module uses roughly 3 * expand * d_model^2 parameters
-            d_model=in_channels, # Model dimension d_model
-            d_state=16,  # SSM state expansion factor
-            d_conv=4,    # Local convolution width
-            expand=2,    # Block expansion factor
-        )
-        self.w_backward_scan = Mamba(
-            # This module uses roughly 3 * expand * d_model^2 parameters
-            d_model=in_channels, # Model dimension d_model
+            d_model=2, # Model dimension d_model
             d_state=16,  # SSM state expansion factor
             d_conv=4,    # Local convolution width
             expand=2,    # Block expansion factor
         )
 
-    def forward(self, x1, x2):
-        """
+    def forward(self, fo1, fo2):
+        B, C, H, W = fo1.shape  # BxCxHxW
+
+        h_forward = to_line_scanable_sequence(fo1, False, "h_forward")  # BxLxC
+        h_backward = to_line_scanable_sequence(fo1, False, "h_backward")  # BxLxC
+        w_forward = to_line_scanable_sequence(fo1, False, "w_forward")  # BxLxC
+        w_backward = to_line_scanable_sequence(fo1, False, "w_backward")  # BxLxC
         
-        """
-        B, C, H, W = x1.shape  # BxCxHxW
+        fop = torch.concat([h_forward, h_backward, w_forward, w_backward], 2)  # BxLx4C
+        fop = self.mamba1(fop)  # BxLx4C
+        fop = fop.reshape(B, H * W, 4, C).sum(2)  # BxLxC
+        fop = fop.permute(0, 2, 1).reshape(B, C, H, W)
 
-        x1.reshape(B, C, -1).permute(0, 2, 1)  # BxLxC
-        return x
+        residual = fop * fo2  # BxCxHxW
+
+        foc = F.adaptive_avg_pool2d(residual, (1, 1))  # BxCx1x1
+        foc = foc.reshape(B, C, 1)
+        # Here, the sequence length "L" is the channel dimension "C"
+        c_forward = foc  # BxCx1
+        c_backward = foc.clone().flip(1)  # BxCx1
+        foc = torch.concat([c_forward, c_backward], 2)  # BxCx2
+        foc = self.mamba2(foc)  # BxCx2
+        foc = foc.sum(2, keepdim=True).unsqueeze(-1)  # BxCx1x1
+
+        foss = foc * residual + residual
+        return foss
     
 
 class OSSModule(nn.Module):
@@ -189,6 +106,7 @@ class OSSModule(nn.Module):
         super().__init__()
         self.in_projection = nn.Conv2d(in_channels, 2 * in_channels, 1, 1, 0, bias=bias)
         self.dwconv = DConv(in_channels, 1, 3, 1, bias=bias)
+        self.oss = OSS(in_channels)
         self.out_projection = nn.Conv2d(in_channels, in_channels, 1, 1, 0, bias=bias)
 
     def forward(self, x):
@@ -202,11 +120,11 @@ class OSSModule(nn.Module):
         merging the refined features with complementary information. After passing through
         a 1x1 convolution, the output of OSS generates the final output of the OSS block...
         """
-        x1, x2 = self.in_projection(x).chunk(2, dim=1)
-        x1 = F.silu(self.dwconv(x1))
-        x2 = F.silu(x2)
-
-        x = self.out_projection(x)
+        fo1, fo2 = self.in_projection(x).chunk(2, dim=1)
+        fo1 = F.silu(self.dwconv(fo1))
+        fo2 = F.silu(fo2)
+        foss = self.oss(fo1, fo2)  # BxCxHxW
+        x = self.out_projection(foss)
         return x
     
 
