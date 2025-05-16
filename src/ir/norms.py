@@ -32,30 +32,30 @@ def get_activation(act_fn: str) -> nn.Module:
 
 class AdaGroupNorm(nn.Module):
     r"""
-    GroupNorm layer modified to incorporate timestep embeddings.
+    GroupNorm layer modified to condition on embeddings.
 
     Parameters:
-        embedding_dim (`int`): The size of each embedding vector.
-        num_embeddings (`int`): The size of the embeddings dictionary.
+        embed_dim (`int`): The size of each embedding vector.
+        in_channels (`int`): The size of each input vector.
         num_groups (`int`): The number of groups to separate the channels into.
         act_fn (`str`, *optional*, defaults to `None`): The activation function to use.
         eps (`float`, *optional*, defaults to `1e-5`): The epsilon value to use for numerical stability.
     """
 
     def __init__(
-        self, embedding_dim: int, out_dim: int, num_groups: int, act_fn: Optional[str] = None, eps: float = 1e-5
+        self, embed_dim: int, in_channels: int, num_groups: int, act_fn: Optional[str] = None, eps: float = 1e-5
     ):
         super().__init__()
         self.num_groups = num_groups
         self.eps = eps
-        self.out_dim = out_dim
+        self.in_channels = in_channels
 
         if act_fn is None:
             self.act = None
         else:
             self.act = get_activation(act_fn)
 
-        self.linear = nn.Linear(embedding_dim, out_dim * 2)
+        self.linear = nn.Linear(embed_dim, in_channels * 2)
         
     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
         if self.act:

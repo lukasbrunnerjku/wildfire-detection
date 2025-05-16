@@ -11,6 +11,7 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Optional
 
 # Efficient Selective SSM Code: https://github.com/state-spaces/mamba (UVM-Net uses this code)
 # ---> REQUIRES LINUX <---
@@ -18,6 +19,8 @@ import torch.nn.functional as F
 from mamba_ssm import Mamba  # pip install mamba-ssm[causal-conv1d]
 
 from .scan import to_line_scanable_sequence
+from .norms import AdaGroupNorm
+from .model_utils import CondSequential
 
 
 class DConv(nn.Conv2d):
@@ -72,7 +75,7 @@ class OSS(nn.Module):
             expand=2,    # Block expansion factor
         )
 
-    def forward(self, fo1, fo2):
+    def forward(self, fo1: Tensor, fo2: Tensor):
         B, C, H, W = fo1.shape  # BxCxHxW
 
         h_forward = to_line_scanable_sequence(fo1, False, "h_forward")  # BxLxC
@@ -128,22 +131,107 @@ class OSSModule(nn.Module):
         return x
     
 
+def get_groups(in_channels: int) -> int:
+    if in_channels < 16:
+        return in_channels
+    elif in_channels % 16 == 0:
+        return 16
+    else:
+        raise ValueError(f"{in_channels=} incompatible.")
+
+
+class Norm(nn.Module):
+
+    def __init__(self, norm_type: str, in_channels: int, embed_dim: Optional[int] = None):
+        super().__init__()
+        assert norm_type in ("layer", "group", "ada_group")
+
+        if norm_type == "layer":
+            self.norm = nn.LayerNorm(in_channels)
+        elif norm_type == "group":
+            self.norm = nn.GroupNorm(get_groups(in_channels), in_channels)
+        elif norm_type == "ada_group":
+            assert embed_dim is not None
+            self.norm = AdaGroupNorm(embed_dim, in_channels, get_groups(in_channels))
+
+    def forward(self, x: Tensor, emb: Optional[Tensor] = None):
+        if emb is None:
+            return self.norm(x)
+        else:
+            return self.norm(x, emb)
+
+
 class OSSBlock(nn.Module):
 
-    def __init__(self):
+    def __init__(
+        self,
+        norm_type: str,
+        in_channels: int,
+        embed_dim: Optional[int] = None,
+        ffn_expansion_factor: int = 2,
+    ):
         super().__init__()
+        self.norm1 = Norm(norm_type, in_channels, embed_dim)
+        self.oss_module = OSSModule(in_channels)
+        self.norm2 = Norm(norm_type, in_channels, embed_dim)
+        self.effn = EFFN(in_channels, ffn_expansion_factor)
 
-    def forward(self, x):
+    def forward(self, x: Tensor):
+        x = self.oss_module(self.norm1(x)) + x
+        x = self.effn(self.norm2(x)) + x
         return x
     
 
 class VmambaIR(nn.Module):
 
-    def __init__(self):
+    def __init__(
+        self,
+        in_channels: int,
+        block_out_channels: tuple[int, ...] = (48, 96, 192, 384),
+        oss_blocks_per_scale: tuple[int, ...] = (4, 4, 6, 8),
+        num_class_embeds: Optional[int] = None,
+    ):
+        """
+        L1 objective
+        AdamW
+        betas = (0.9, 0.999)
+        lr = 3e-4
+        weight_decay = 1e-4
+        """
         super().__init__()
+        if len(block_out_channels) != len(oss_blocks_per_scale):
+            raise ValueError("Must provide same number of `block_out_channels` and `oss_blocks_per_scale`")
 
-    def forward(self, x):
-        return x
+        self.conv_in = nn.Conv2d(in_channels, block_out_channels[0], 3, 1, 1)
+
+        if num_class_embeds is not None:
+            embed_dim = block_out_channels[0] * 4
+            self.embedding = nn.Embedding(num_class_embeds, embed_dim)
+
+        self.down_blocks = nn.ModuleList([])
+        self.mid_block = None
+        self.up_blocks = nn.ModuleList([])
+
+        if num_class_embeds is not None:
+            for i in range(len(block_out_channels)):
+                block_out_channels[i]
+                oss_blocks_per_scale[i]
+            OSSBlock(norm_type, )
+            CondSequential()
+        else:
+            nn.Sequential()
+        
+    def forward(self, x: Tensor, emb: Optional[Tensor] = None):
+        residual = x
+
+        x = self.conv_in(x)
+        
+        down_residuals = ()
+        for down_block in self.down_blocks:
+            
+            x =  
+
+        return x + residual
     
 
 if __name__ == "__main__":
