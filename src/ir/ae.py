@@ -4,7 +4,8 @@ from torch.nn import functional as F
 from typing import Optional
 
 from .norms import AdaGroupNorm, get_activation
-    
+from .model_utils import CondSequential
+
 
 class ResBlock(nn.Module):
     def __init__(self, in_channel, channel, conv_cls=None):
@@ -24,20 +25,6 @@ class ResBlock(nn.Module):
 
     def forward(self, input):
         return input + self.net(input)
-    
-
-class CondSequential(nn.Module):
-    def __init__(self, *layers):
-        super().__init__()
-        self.layers = nn.ModuleList(layers)
-
-    def forward(self, x, cond=None):
-        for layer in self.layers:
-            if cond is not None:
-                x = layer(x, cond)
-            else:
-                x = layer(x)
-        return x
     
 
 class CondResBlock(nn.Module):

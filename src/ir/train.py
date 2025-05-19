@@ -50,7 +50,7 @@ class ModelConf:
     # Num. of different env. temp. but
     # if set to 0 => no conditioning used.
     num_cond_embed: int = 31
-    unet: bool = True
+    unet: bool = False
 
 
 @dataclass
@@ -402,13 +402,13 @@ if __name__ == "__main__":
     [~] predict unnormalized residuals
     [~+] train batch size 8 instead of 16 & AMP & double steps (to have seen same amount of data)
     [--] UNet stride 4 with condition
-    [---] let AE predict image directly instead of residual prediction TODO: buggy?
     [--] "use_ssim" in criterion
     [x] SSIM and PSNR on tone mapped images to be compatible with other IR methods
     [-] unet with residual prediction
-    [] is unet better suited if predicting image directly instead of residual?
+    [-] is unet better suited if predicting image directly instead of residual?
+    => no matter what unet is worse till now
 
-    # TODO: still a bug in model prediction direct image? visu seem worse but metric better???
+    [---????] let models predict image directly instead of residual prediction TODO: buggy visu residual?
 
     TODO
     [] GAN loss, perceptual loss etc as in VMambaIR and VQGAN.

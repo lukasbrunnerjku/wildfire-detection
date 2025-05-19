@@ -15,7 +15,7 @@ from typing import Optional
 
 # Efficient Selective SSM Code: https://github.com/state-spaces/mamba (UVM-Net uses this code)
 # ---> REQUIRES LINUX <---
-# Mamba or Mamba2 ?
+# TODO Mamba or Mamba2 ?
 from mamba_ssm import Mamba  # pip install mamba-ssm[causal-conv1d]
 
 from .scan import to_line_scanable_sequence
@@ -176,9 +176,9 @@ class OSSBlock(nn.Module):
         self.norm2 = Norm(norm_type, in_channels, embed_dim)
         self.effn = EFFN(in_channels, ffn_expansion_factor)
 
-    def forward(self, x: Tensor):
-        x = self.oss_module(self.norm1(x)) + x
-        x = self.effn(self.norm2(x)) + x
+    def forward(self, x: Tensor, emb: Optional[Tensor] = None):
+        x = self.oss_module(self.norm1(x, emb)) + x
+        x = self.effn(self.norm2(x, emb)) + x
         return x
     
 
@@ -190,6 +190,7 @@ class VmambaIR(nn.Module):
         block_out_channels: tuple[int, ...] = (48, 96, 192, 384),
         oss_blocks_per_scale: tuple[int, ...] = (4, 4, 6, 8),
         num_class_embeds: Optional[int] = None,
+        oss_refine_blocks: int = 2, 
     ):
         """
         L1 objective
@@ -205,34 +206,88 @@ class VmambaIR(nn.Module):
         self.conv_in = nn.Conv2d(in_channels, block_out_channels[0], 3, 1, 1)
 
         if num_class_embeds is not None:
+            norm_type = "ada_group"
             embed_dim = block_out_channels[0] * 4
             self.embedding = nn.Embedding(num_class_embeds, embed_dim)
+        else:
+            norm_type = "layer"
+            embed_dim = None
 
         self.down_blocks = nn.ModuleList([])
+        self.downsample_blocks = nn.ModuleList([])
         self.mid_block = None
         self.up_blocks = nn.ModuleList([])
+        self.upsample_blocks = nn.ModuleList([])
+        self.skip_projections = nn.ModuleList([])
+        self.refine_block = None
+        self.conv_out = nn.Conv2d(block_out_channels[0], in_channels, 3, 1, 1)
 
-        if num_class_embeds is not None:
-            for i in range(len(block_out_channels)):
-                block_out_channels[i]
-                oss_blocks_per_scale[i]
-            OSSBlock(norm_type, )
-            CondSequential()
-        else:
-            nn.Sequential()
-        
-    def forward(self, x: Tensor, emb: Optional[Tensor] = None):
-        residual = x
+        # down, total stride of 2^(len(block_out_channels) - 1)
+        for i in range(len(block_out_channels) - 1):
+            in_channels = block_out_channels[i]
+            out_channels = block_out_channels[i + 1]
 
-        x = self.conv_in(x)
-        
-        down_residuals = ()
-        for down_block in self.down_blocks:
+            blocks = []
+            for _ in range(oss_blocks_per_scale[i]):
+                blocks.append(OSSBlock(norm_type, in_channels, embed_dim))
+            self.down_blocks.append(CondSequential(*blocks))
+
+            self.downsample_blocks.append(nn.Conv2d(in_channels, out_channels, 4, 2, 1))
+
+        # mid, use last block_out_channels and oss_blocks_per_scale
+        blocks = []
+        for _ in range(oss_blocks_per_scale[-1]):
+            blocks.append(OSSBlock(norm_type, block_out_channels[-1], embed_dim))
+        self.mid_block = CondSequential(*blocks)
+
+        # up, till input resolution
+        for i in reversed(range(1, len(block_out_channels))):
+            in_channels = block_out_channels[i]
+            out_channels = block_out_channels[i + 1]
+
+            self.upsample_blocks.append(nn.ConvTranspose2d(in_channels, out_channels, 4, 2, 1))
+
+            self.skip_projections.append(nn.Conv2d(2 * out_channels, out_channels, 1, 1, 0))
+
+            blocks = []
+            for _ in range(oss_blocks_per_scale[i + 1]):
+                blocks.append(OSSBlock(norm_type, out_channels, embed_dim))
+            self.up_blocks.append(CondSequential(*blocks))
+
+        if oss_refine_blocks > 0:
+            blocks = []
+            for _ in range(oss_refine_blocks):
+                blocks.append(OSSBlock(norm_type, block_out_channels[0], embed_dim))
+            self.refine_block = CondSequential(*blocks)
+
+        n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"VmambaIR with {1e-6 * n_params:.3f} M parameters.")
             
-            x =  
+    def forward(self, x: Tensor, emb: Optional[Tensor] = None):
+        """Returns the IR residual, not restored image directly."""
+        x = self.conv_in(x)
 
-        return x + residual
-    
+        residuals = ()
+        for i in range(len(self.down_blocks)):
+            x = self.down_blocks[i](x, emb)
+            residuals += (x,)
+            x = self.downsample_blocks[i](x)
+
+        x = self.mid_block(x, emb)
+
+        residuals = tuple(reversed(residuals))
+        for i in range(len(self.up_blocks)):
+            x = self.upsample_blocks[i](x)
+            x = torch.concat((x, residuals[i]))
+            x = self.skip_projections[i](x)
+            x = self.up_blocks[i](x, emb)
+
+        if self.refine_block is not None:
+            x = self.refine_block(x, emb)
+
+        x = self.conv_out(x)
+        return x
+
 
 if __name__ == "__main__":
-    pass
+    model = VmambaIR(1, (48, 96, 192, 384), (4, 4, 6, 8), 31)
