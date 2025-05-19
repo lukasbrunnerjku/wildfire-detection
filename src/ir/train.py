@@ -22,11 +22,13 @@ from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMe
 
 from .ae import Autoencoder
 from .unet import UNet
+from .mamba import VmambaIR
 from .data import AOSDataset
 from .similarity import SSIM
 from ..utils.image import tone_mapping, pil_make_grid, to_zero_one_range
 from ..utils.weight_decay import weight_decay_parameter_split
-
+from ..vqvae.perceptual_loss import PerceptualLoss
+from ..vqvae.gan import AdversarialLoss
 
 def setup_torch(seed: int):
     torch.manual_seed(seed)
@@ -49,13 +51,13 @@ class ModelConf:
     embed_dim: int = 64
     # Num. of different env. temp. but
     # if set to 0 => no conditioning used.
-    num_cond_embed: int = 31
-    unet: bool = False
+    num_cond_embed: int = 0 # 31
+    arch: str = "mamba"  # ""
 
 
 @dataclass
 class DataConf:
-    meta_path: Path = Path("C:/IR/data/Batch-1.json")
+    meta_path: Path = Path("/mnt/data/wildfire/IR/Batch-1.json") # Path("C:/IR/data/Batch-1.json")
     val_split: float = 0.1
     key: str = "area_07"
     threshold: float = 0.33
@@ -73,11 +75,11 @@ class TrainConf:
     log_n_images: int = 4
     train_batch_size: int = 8
     eval_batch_size: int = 16
-    learning_rate: float = 1e-3
+    learning_rate: float = 3e-4 # 1e-3
     min_learning_rate: float = 1e-6
-    weight_decay: float = 1e-2
+    weight_decay: float = 1e-4  # 1e-2
     beta1: float = 0.9
-    beta2: float = 0.99
+    beta2: float = 0.999 # 0.99
     gradient_clip_val: float = 1.0
     num_workers: int = 0
     # If use_ssim is False then we penalize the model if it is not
@@ -89,9 +91,26 @@ class TrainConf:
     normalize_residual: bool = False  # NOTE: has no effect if predict_imag=True
     decay_groups: bool = False
     predict_image: bool = True
+    img_sz: tuple[int] = (512, 512)
+    # Select loss variations via "objective"
+    objective: str = "L2"  # L2, L1, PERC, GAN; default=L2
+    perc_weight: float = 0.5
+    l1_weight: float = 1.0
+    # Perceptual Loss (predict_image must be True!)
+    resnet_type: str = "resnet18"
+    up_to_layer: Optional[int] = 2
+    # GAN Loss (predict_image must be True!)
+    start_epoch: int = 10
+    disc_weight: float = 0.1
+    adaptive_weight: bool = False
+    loss_type: str = "hinge"
+    lecam_reg_weight: float = 1e-3
+    ema_decay: float = 0.99
+    n_layers: int = 2
+    ### ###
     model: ModelConf = field(default_factory=ModelConf)
     data: DataConf = field(default_factory=DataConf)
-    runs: Path = Path("C:/IR/runs/autoencoder")
+    runs: Path = Path("/mnt/data/wildfire/IR/runs/new")  # C:/IR/runs/autoencoder
 
 
 def create_grid(
@@ -140,13 +159,51 @@ class ImageCriterion(nn.Module):
         use_ssim: bool = True,
         aos_mean: Optional[float] = None,
         aos_std: Optional[float] = None,
+        # Select loss variations via "objective"
+        objective: str = "L1",
+        # Perceptual Loss
+        resnet_type: str = "resnet18",
+        up_to_layer: Optional[int] = 2,
+        # GAN loss
+        start_epoch: int = 10,
+        disc_weight: float = 0.1,
+        adaptive_weight: bool = False,
+        loss_type: str = "hinge",
+        lecam_reg_weight: float = 1e-3,
+        ema_decay: float = 0.99,
+        n_layers: int = 2,
     ):
         super().__init__()
         self.use_ssim = use_ssim
         self.aos_mean = aos_mean
         self.aos_std = aos_std
-        self.mse = nn.MSELoss(reduction="none")
-        self.ssim = SSIM(win_size=win_size)
+        self.objective = objective
+
+        if objective == "L2":
+            self.mse = nn.MSELoss(reduction="none")
+            self.ssim = SSIM(win_size=win_size)
+        elif objective == "L1":
+            self.mae = nn.L1Loss(reduction="none")
+        elif objective == "PERC":
+            self.mae = nn.L1Loss(reduction="none")
+            self.perc = PerceptualLoss(resnet_type, up_to_layer)
+        elif objective == "GAN":
+            self.mae = nn.L1Loss(reduction="none")
+            self.perc = PerceptualLoss(resnet_type, up_to_layer)
+            assert start_epoch >= 0
+            self.adv = AdversarialLoss(
+                in_channels=1,
+                disc_weight=disc_weight,
+                start_step=start_epoch,
+                adaptive_weight=adaptive_weight,
+                loss_type=loss_type,
+                lecam_reg_weight=lecam_reg_weight,
+                ema_decay=ema_decay,
+                n_layers=n_layers,
+            )
+        else:
+            raise ValueError(f"Unknown {objective=}")
+        
         self._last_ssim = None
 
     def forward(
@@ -162,16 +219,34 @@ class ImageCriterion(nn.Module):
         gt ... if AOS would be error free
         """
         pred_img = self.aos_std * pred_img_norm + self.aos_mean
-        mse = self.mse(pred_img, gt)
         
-        if self.use_ssim:  # Try to avoid hallucinations with SSIM weighting.
-            ssim = get_ssim(self.ssim, aos, gt)
-            self._last_ssim = ssim  # For visualization purpose.
-            loss = (ssim * mse).sum() / (ssim.sum() + 1e-5)
-        else:  # Try to guess hidden structures, force hallucinations.
-            loss = mse.mean()
+        if self.objective == "L2":
+            mse = self.mse(pred_img, gt)
+        
+            if self.use_ssim:  # Try to avoid hallucinations with SSIM weighting.
+                ssim = get_ssim(self.ssim, aos, gt)
+                self._last_ssim = ssim  # For visualization purpose.
+                total_loss = (ssim * mse).sum() / (ssim.sum() + 1e-5)
+            else:  # Try to guess hidden structures, force hallucinations.
+                total_loss = mse.mean()
+            
+            return {"total_loss": total_loss}
 
-        return loss
+        elif self.objective == "L1":
+            total_loss = self.mae(pred_img, gt).mean()
+            return {"total_loss": total_loss}
+
+        elif self.objective == "PERC":
+
+            return {
+                "total_loss": total_loss,
+            }
+        
+        elif self.objective == "GAN":
+
+            return {
+                "total_loss": total_loss,
+            }
     
 
 class ResidualCriterion(nn.Module):
@@ -477,7 +552,18 @@ if __name__ == "__main__":
     )
 
     # Initialize model, loss function, and optimizer
-    if conf.model.unet:
+    if conf.model.arch == "mamba":
+        num_class_embeds = None if conf.model.num_cond_embed <= 0 else conf.model.num_cond_embed
+        model = VmambaIR(
+            1,
+            conf.img_sz,
+            (16, 32, 64),
+            (2, 2, 2),
+            num_class_embeds,
+            1,
+            conf.predict_image,
+        )
+    elif conf.model.arch == "unet":
         block_out_channels = [32, 32, 64, 64, 128]  # Stride 16
 
         if conf.model.num_cond_embed > 0:
@@ -511,7 +597,7 @@ if __name__ == "__main__":
         else:
             from torch.nn import Conv2d, ConvTranspose2d
             
-        kwargs = {k: v for k, v in conf.model.items() if k not in ("gated", "unet")}
+        kwargs = {k: v for k, v in conf.model.items() if k not in ("gated", "arch")}
         model = Autoencoder(
             in_channel=1,
             conv_cls=Conv2d,
@@ -562,7 +648,17 @@ if __name__ == "__main__":
             use_ssim=conf.use_ssim,
             aos_mean=aos_mean,
             aos_std=aos_std,
-        ).to(accelerator.device)
+            objective=conf.objective,
+            resnet_type=conf.resnet_type,
+            up_to_layer=conf.up_to_layer,
+            start_epoch=conf.start_epoch,
+            disc_weight=conf.disc_weight,
+            adaptive_weight=conf.adaptive_weight,
+            loss_type=conf.loss_type,
+            lecam_reg_weight=conf.lecam_reg_weight,
+            ema_decay=conf.ema_decay,
+            n_layers=conf.n_layers,
+        )
         val_criterion = ImageCriterion(
             use_ssim=True,
             aos_mean=aos_mean,
@@ -575,7 +671,7 @@ if __name__ == "__main__":
             normalize_residual=conf.normalize_residual,
             res_mean=res_mean,
             res_std=res_std,
-        ).to(accelerator.device)
+        )
         val_criterion = ResidualCriterion(
             use_ssim=True,
             residual_target=conf.residual_target,
@@ -588,8 +684,8 @@ if __name__ == "__main__":
     metrics = Metrics().to(accelerator.device)
 
     # Prepare everything with Accelerator
-    model, optimizer, dataloader, val_dataloader = accelerator.prepare(
-        model, optimizer, dataloader, val_dataloader
+    model, criterion, optimizer, dataloader, val_dataloader = accelerator.prepare(
+        model, criterion, optimizer, dataloader, val_dataloader
     )
 
     def train_loop():
@@ -620,6 +716,8 @@ if __name__ == "__main__":
                     pred_res_or_img = model(aos_normalized)
 
                 loss = criterion(pred_res_or_img, aos, gt)
+                if not isinstance(loss, torch.Tensor):
+                    loss = loss["total_loss"] 
                 
                 accelerator.backward(loss)
                 optimizer.step()
@@ -679,7 +777,10 @@ if __name__ == "__main__":
                         else:
                             pred_res_or_img = model(aos_normalized)
 
-                        val_loss += val_criterion(pred_res_or_img, aos, gt).item()
+                        loss = val_criterion(pred_res_or_img, aos, gt)
+                        if not isinstance(loss, torch.Tensor):
+                            total_loss = loss["total_loss"]
+                        val_loss += total_loss.item()
 
                         pred = to_image(pred_res_or_img, aos, aos_std, aos_mean, conf)
                         metrics.update(pred, gt)

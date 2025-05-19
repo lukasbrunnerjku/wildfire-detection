@@ -16,7 +16,8 @@ from typing import Optional
 # Efficient Selective SSM Code: https://github.com/state-spaces/mamba (UVM-Net uses this code)
 # ---> REQUIRES LINUX <---
 # TODO Mamba or Mamba2 ?
-from mamba_ssm import Mamba  # pip install mamba-ssm[causal-conv1d]
+# WORKED --> pip install mamba-ssm --no-build-isolation
+from mamba_ssm import Mamba  # pip install mamba-ssm[causal-conv1d] ?
 
 from .scan import to_line_scanable_sequence
 from .norms import AdaGroupNorm
@@ -132,6 +133,7 @@ class OSSModule(nn.Module):
     
 
 def get_groups(in_channels: int) -> int:
+    return in_channels  # TODO now equals layer norm on HxWxC input with normalized shape of C,
     if in_channels < 16:
         return in_channels
     elif in_channels % 16 == 0:
@@ -142,17 +144,20 @@ def get_groups(in_channels: int) -> int:
 
 class Norm(nn.Module):
 
-    def __init__(self, norm_type: str, in_channels: int, embed_dim: Optional[int] = None):
+    def __init__(self, norm_type: str, in_channels: int, img_sz: tuple[int], embed_dim: Optional[int] = None):
         super().__init__()
         assert norm_type in ("layer", "group", "ada_group")
 
         if norm_type == "layer":
-            self.norm = nn.LayerNorm(in_channels)
+            # The ONLY reason we need to know spatial resolution!
+            self.norm = nn.LayerNorm((in_channels, *img_sz))  # affine per channel AND per pixel
         elif norm_type == "group":
-            self.norm = nn.GroupNorm(get_groups(in_channels), in_channels)
+            self.norm = nn.GroupNorm(get_groups(in_channels), in_channels)  # affine per channel group
         elif norm_type == "ada_group":
             assert embed_dim is not None
-            self.norm = AdaGroupNorm(embed_dim, in_channels, get_groups(in_channels))
+            # TODO read more about layer vs group norm
+            # !! https://docs.pytorch.org/docs/stable/generated/torch.nn.GroupNorm.html
+            self.norm = AdaGroupNorm(embed_dim, in_channels, get_groups(in_channels))  # affine per channel group
 
     def forward(self, x: Tensor, emb: Optional[Tensor] = None):
         if emb is None:
@@ -167,13 +172,14 @@ class OSSBlock(nn.Module):
         self,
         norm_type: str,
         in_channels: int,
+        img_sz: tuple[int],
         embed_dim: Optional[int] = None,
         ffn_expansion_factor: int = 2,
     ):
         super().__init__()
-        self.norm1 = Norm(norm_type, in_channels, embed_dim)
+        self.norm1 = Norm(norm_type, in_channels, img_sz, embed_dim)
         self.oss_module = OSSModule(in_channels)
-        self.norm2 = Norm(norm_type, in_channels, embed_dim)
+        self.norm2 = Norm(norm_type, in_channels, img_sz, embed_dim)
         self.effn = EFFN(in_channels, ffn_expansion_factor)
 
     def forward(self, x: Tensor, emb: Optional[Tensor] = None):
@@ -187,10 +193,12 @@ class VmambaIR(nn.Module):
     def __init__(
         self,
         in_channels: int,
+        img_sz: tuple[int],
         block_out_channels: tuple[int, ...] = (48, 96, 192, 384),
         oss_blocks_per_scale: tuple[int, ...] = (4, 4, 6, 8),
         num_class_embeds: Optional[int] = None,
         oss_refine_blocks: int = 2, 
+        predict_image: bool = True,
     ):
         """
         L1 objective
@@ -203,6 +211,8 @@ class VmambaIR(nn.Module):
         if len(block_out_channels) != len(oss_blocks_per_scale):
             raise ValueError("Must provide same number of `block_out_channels` and `oss_blocks_per_scale`")
 
+        self.predict_image = predict_image  # Residual or restored image?
+
         self.conv_in = nn.Conv2d(in_channels, block_out_channels[0], 3, 1, 1)
 
         if num_class_embeds is not None:
@@ -210,8 +220,9 @@ class VmambaIR(nn.Module):
             embed_dim = block_out_channels[0] * 4
             self.embedding = nn.Embedding(num_class_embeds, embed_dim)
         else:
-            norm_type = "layer"
+            norm_type = "group"
             embed_dim = None
+            self.embedding = None
 
         self.down_blocks = nn.ModuleList([])
         self.downsample_blocks = nn.ModuleList([])
@@ -222,6 +233,8 @@ class VmambaIR(nn.Module):
         self.refine_block = None
         self.conv_out = nn.Conv2d(block_out_channels[0], in_channels, 3, 1, 1)
 
+        h, w = img_sz
+
         # down, total stride of 2^(len(block_out_channels) - 1)
         for i in range(len(block_out_channels) - 1):
             in_channels = block_out_channels[i]
@@ -229,35 +242,37 @@ class VmambaIR(nn.Module):
 
             blocks = []
             for _ in range(oss_blocks_per_scale[i]):
-                blocks.append(OSSBlock(norm_type, in_channels, embed_dim))
+                blocks.append(OSSBlock(norm_type, in_channels, (h, w), embed_dim))
             self.down_blocks.append(CondSequential(*blocks))
 
             self.downsample_blocks.append(nn.Conv2d(in_channels, out_channels, 4, 2, 1))
+            h, w = h // 2, w // 2
 
         # mid, use last block_out_channels and oss_blocks_per_scale
         blocks = []
         for _ in range(oss_blocks_per_scale[-1]):
-            blocks.append(OSSBlock(norm_type, block_out_channels[-1], embed_dim))
+            blocks.append(OSSBlock(norm_type, block_out_channels[-1], (h, w), embed_dim))
         self.mid_block = CondSequential(*blocks)
 
         # up, till input resolution
         for i in reversed(range(1, len(block_out_channels))):
             in_channels = block_out_channels[i]
-            out_channels = block_out_channels[i + 1]
+            out_channels = block_out_channels[i - 1]
 
             self.upsample_blocks.append(nn.ConvTranspose2d(in_channels, out_channels, 4, 2, 1))
+            h, w = 2 * h, 2 * w
 
             self.skip_projections.append(nn.Conv2d(2 * out_channels, out_channels, 1, 1, 0))
 
             blocks = []
-            for _ in range(oss_blocks_per_scale[i + 1]):
-                blocks.append(OSSBlock(norm_type, out_channels, embed_dim))
+            for _ in range(oss_blocks_per_scale[i - 1]):
+                blocks.append(OSSBlock(norm_type, out_channels, (h, w), embed_dim))
             self.up_blocks.append(CondSequential(*blocks))
 
         if oss_refine_blocks > 0:
             blocks = []
             for _ in range(oss_refine_blocks):
-                blocks.append(OSSBlock(norm_type, block_out_channels[0], embed_dim))
+                blocks.append(OSSBlock(norm_type, block_out_channels[0], (h, w), embed_dim))
             self.refine_block = CondSequential(*blocks)
 
         n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -265,7 +280,12 @@ class VmambaIR(nn.Module):
             
     def forward(self, x: Tensor, emb: Optional[Tensor] = None):
         """Returns the IR residual, not restored image directly."""
+        x_input = x
+
         x = self.conv_in(x)
+
+        if emb is not None:
+            emb = self.embedding(emb)
 
         residuals = ()
         for i in range(len(self.down_blocks)):
@@ -278,7 +298,7 @@ class VmambaIR(nn.Module):
         residuals = tuple(reversed(residuals))
         for i in range(len(self.up_blocks)):
             x = self.upsample_blocks[i](x)
-            x = torch.concat((x, residuals[i]))
+            x = torch.concat((x, residuals[i]), 1)
             x = self.skip_projections[i](x)
             x = self.up_blocks[i](x, emb)
 
@@ -286,8 +306,21 @@ class VmambaIR(nn.Module):
             x = self.refine_block(x, emb)
 
         x = self.conv_out(x)
+
+        if self.predict_image:
+            x = x + x_input
+
         return x
 
 
 if __name__ == "__main__":
-    model = VmambaIR(1, (48, 96, 192, 384), (4, 4, 6, 8), 31)
+    x = torch.randn(2, 1, 128, 128).cuda()
+    emb = torch.randint(0, 31, (2,)).cuda()
+
+    model = VmambaIR(1, (128, 128), (32, 64, 96), (2, 2, 2), None).cuda()
+    y = model(x, None)
+    print(y.shape)
+
+    model = VmambaIR(1, (128, 128), (32, 64, 96), (2, 2, 2), 31).cuda()
+    y = model(x, emb)
+    print(y.shape)
