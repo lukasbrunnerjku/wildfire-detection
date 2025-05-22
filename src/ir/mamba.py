@@ -1,6 +1,8 @@
 """
 UVM-Net Code: https://github.com/zzr-idam/UVM-Net
 
+Efficient Selective SSM Code: https://github.com/state-spaces/mamba (UVM-Net uses this code)
+
 VmambaIR: https://arxiv.org/pdf/2403.11423 (no code yet)
 
 Educational Code Examples: https://github.com/alxndrTL/mamba.py
@@ -12,15 +14,10 @@ from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
-
-# Efficient Selective SSM Code: https://github.com/state-spaces/mamba (UVM-Net uses this code)
-# ---> REQUIRES LINUX <---
-# TODO Mamba or Mamba2 ?
-# WORKED --> pip install mamba-ssm --no-build-isolation
-from mamba_ssm import Mamba  # pip install mamba-ssm[causal-conv1d] ?
+from mamba_ssm import Mamba  # TODO Mamba or Mamba2 ?
 
 from .scan import to_line_scanable_sequence
-from .norms import AdaGroupNorm
+from .norms import AdaLayerNorm
 from .model_utils import CondSequential
 
 
@@ -130,16 +127,6 @@ class OSSModule(nn.Module):
         foss = self.oss(fo1, fo2)  # BxCxHxW
         x = self.out_projection(foss)
         return x
-    
-
-def get_groups(in_channels: int) -> int:
-    return in_channels  # TODO now equals layer norm on HxWxC input with normalized shape of C,
-    if in_channels < 16:
-        return in_channels
-    elif in_channels % 16 == 0:
-        return 16
-    else:
-        raise ValueError(f"{in_channels=} incompatible.")
 
 
 class Norm(nn.Module):
