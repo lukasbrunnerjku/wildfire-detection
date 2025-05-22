@@ -4,6 +4,9 @@ from pathlib import Path
 import torch
 from torch import Tensor
 from PIL import Image
+import re
+
+from ..utils.image import tone_mapping
 
 
 def find_folders(root: Path) -> list[Path]:
@@ -24,6 +27,61 @@ def read_min_max(file: Path):
 def write_min_max(file: Path, mi, ma):
     with open(file, "w") as fp:
         fp.write(f"{mi},{ma}")
+
+
+def load_single_view(image_file: Path, txt_file: Path):
+    min_temp, max_temp = read_min_max(txt_file)
+    x = torch.from_numpy(cv2.imread(str(image_file), -1).astype(np.float32))  # HxW
+    x = ((max_temp - min_temp) * (x / 255)) + min_temp  # in Kelvin
+    return x
+
+
+def numericalSort(full_path: Path):
+    file_name = full_path.stem  # no extention
+    numbers = re.compile(r"(\d+)")
+    parts = numbers.split(file_name)
+    parts[1::2] = map(int, parts[1::2])
+    return parts
+
+
+def load_center_view(folder: Path) -> Tensor:
+    image_files = sorted((folder / "images").glob("*.png"), key=numericalSort)
+    n_files = len(image_files)
+    assert n_files % 2 == 1
+
+    txt_files = sorted((folder / "images").glob("*.txt"), key=numericalSort)
+    assert len(txt_files) == n_files
+
+    idx = int(n_files / 2)
+    x = load_single_view(image_files[idx], txt_files[idx])
+    return x
+
+
+def drone_flight_gif(
+    folder: Path,
+    min_temp: float, 
+    max_temp: float,
+    output_path: Path,
+    frame_duration: int = 500,
+):
+    """Take global min./max. temp. from Ground Fire GT image."""
+    image_files = sorted((folder / "images").glob("*.png"), key=numericalSort)
+    txt_files = sorted((folder / "images").glob("*.txt"), key=numericalSort)
+
+    frames = []
+    for idx in range(len(image_files)):
+        x = load_single_view(image_files[idx], txt_files[idx])[None, :, :]
+        frames.append(tone_mapping(x, min_temp, max_temp, cv2.COLORMAP_INFERNO))
+
+    # Save the first frame and append the rest as a GIF
+    frames[0].save(
+        output_path,
+        save_all=True,
+        append_images=frames[1:],
+        duration=frame_duration,  # Duration of each frame in ms
+        loop=0  # Infinite loop
+    )
+    print(f"GIF created successfully and saved to {output_path}")
 
 
 def load_xy(dir: Path) -> tuple[Tensor, Tensor]:

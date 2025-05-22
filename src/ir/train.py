@@ -25,6 +25,7 @@ from .unet import UNet
 from .mamba import VmambaIR
 from .data import AOSDataset
 from .similarity import SSIM
+from .utils import load_center_view, drone_flight_gif
 from ..utils.image import tone_mapping, pil_make_grid, to_zero_one_range
 from ..utils.weight_decay import weight_decay_parameter_split
 from ..vqvae.perceptual_loss import PerceptualLoss
@@ -52,7 +53,7 @@ class ModelConf:
     # Num. of different env. temp. but
     # if set to 0 => no conditioning used.
     num_cond_embed: int = 0 # 31
-    arch: str = "mamba"  # ""
+    arch: str = "" # "mamba", "unet", ""
 
 
 @dataclass
@@ -117,18 +118,47 @@ def create_grid(
     ncol: int,
     *imgs_list: list[Tensor],
     colormaps=None,
-    min: Optional[float] = None,
-    max: Optional[float] = None,
+    min_max: Optional[tuple[float, float]] = None,
+    min_max_idx: Optional[int] = None,
+    percentiles: Optional[tuple[float, float]] = None,
 ):
+    """
+    Either all min/max related arguments are None, or...
+    min_max is not None and min_max_idx is None or...
+    min_max is None and min_max_idx is not None...
+
+    If min_max is given directly the "percentiles" argument has no effect.
+
+    Even with percentiles=(0.0, 99.9) we lose the contrast to the peak of
+    ground fire in the tone mapped image. Thus, recommandation against the
+    use of percentiles.
+    """
     if colormaps is None:
         colormaps = [cv2.COLORMAP_INFERNO] * len(imgs_list)
+    
+    def get_min_max(x: Tensor, percentiles: Optional[tuple[float, float]] = None):
+        if percentiles is not None:
+            flat = x.numpy().reshape(-1)
+            _min = float(np.percentile(flat, percentiles[0]))
+            _max = float(np.percentile(flat, percentiles[1]))
+        else:
+            _min, _max = float(x.min()), float(x.max())
+        
+        return _min, _max
+
+    if min_max_idx is not None:
+        imgs = imgs_list[min_max_idx][:ncol]
+        min_max = get_min_max(imgs, percentiles)
     
     tonemapped = []
     for colormap, imgs in zip(colormaps, imgs_list):
         for img in imgs[:ncol]:
-            img_min = min if min is not None else img.min()
-            img_max = max if max is not None else img.max()
-            tonemapped.append(tone_mapping(img, img_min, img_max, colormap))
+            if min_max is None:
+                img_min_max = get_min_max(img, percentiles)
+            else:
+                img_min_max = min_max
+
+            tonemapped.append(tone_mapping(img, *img_min_max, colormap))
             
     grid = pil_make_grid(tonemapped, ncol=ncol)
     return grid
@@ -425,8 +455,7 @@ def log_images(
         colormaps=[
             cv2.COLORMAP_INFERNO, cv2.COLORMAP_INFERNO, cv2.COLORMAP_INFERNO
         ],
-        min=gt.min().cpu(),
-        max=gt.max().cpu(),
+        min_max_idx=2,
     )
     writer.add_image(
         f"{phase}/images",
@@ -450,8 +479,7 @@ def log_images(
         colormaps=[
             cv2.COLORMAP_JET, cv2.COLORMAP_JET,
         ],
-        min=tgt.min().cpu(),
-        max=tgt.max().cpu(),
+        min_max_idx=1,
     )
     writer.add_image(
         f"{phase}/residuals",
@@ -510,7 +538,7 @@ if __name__ == "__main__":
         conf.data.meta_path,
         conf.data.key,
         conf.data.threshold,
-    ).split(conf.data.val_split)  # Train/Val split
+    ).split(conf.data.val_split, conf.seed)  # Train/Val split
     print(f"Number of training samples: {len(dataset)}")
     print(f"Number of validation samples: {len(val_dataset)}")
 
@@ -769,7 +797,8 @@ if __name__ == "__main__":
                         aos = batch["AOS"].to(accelerator.device)[:, None, :, :]
                         gt = batch["GT"].to(accelerator.device)[:, None, :, :]
                         et = batch["ET"].to(accelerator.device)  # B, >> indices
-                        
+                        idx = batch["IDX"]  # B,
+
                         aos_normalized = (aos - aos_mean) / aos_std
 
                         if model.embedding is not None:
@@ -796,6 +825,34 @@ if __name__ == "__main__":
                 if avg_val_loss < best_val_loss:  # Save best model
                     best_val_loss = avg_val_loss
                     torch.save(model.state_dict(), checkpoints / "best.pth")
+
+                if epoch == 0:
+                    folders = []
+                    for i in idx[:conf.log_n_images]:
+                        folders.append(val_dataset.folders[i])
+                    
+                    for i, folder in enumerate(folders):
+                        output_path = conf.runs / f"{i:02d}.gif"
+                        min_temp = float(gt[i].min().cpu())
+                        max_temp = float(gt[i].max().cpu())
+                        drone_flight_gif(folder, min_temp, max_temp, output_path)
+
+                    cev = [load_center_view(f)[None, :, :] for f in folders]
+
+                    grid = create_grid(
+                        conf.log_n_images,
+                        aos.cpu(), cev, gt.cpu(),
+                        colormaps=[
+                            cv2.COLORMAP_INFERNO, cv2.COLORMAP_INFERNO, cv2.COLORMAP_INFERNO
+                        ],
+                        min_max_idx=2,
+                    )
+                    writer.add_image(
+                        "center_view",
+                        np.asarray(grid),
+                        0,
+                        dataformats="HWC",
+                    )
 
                 log_images(
                     writer,

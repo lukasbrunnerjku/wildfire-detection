@@ -38,12 +38,11 @@ class AOSDataset(Dataset):
         folder = self.folders[idx]  # ie. /Batch-1/27/abc30f62e9ba47cab97c3ef3850a114d
         et = int(folder.parent.name)  # Environment Temperature (ET)
         x, y = load_xy(folder)
-        # z = y - x
         return {
             "AOS": x,
             "GT": y,
-            # "RES": z,
             "ET": et,
+            "IDX": idx,
         }
     
     def split(self, val_split: float, seed: Optional[int] = None):

@@ -51,5 +51,11 @@
             "request": "launch",
             "module": "src.ir.scan"
         },
+        {
+            "name": "inference",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.ir.inference"
+        },
     ]
 }
