@@ -6,12 +6,14 @@ from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from torch.utils.tensorboard import SummaryWriter
 import torchvision.transforms.functional as TF
+import torch.nn.functional as F
 from omegaconf import OmegaConf
 from dataclasses import dataclass, field
 import numpy as np
 import random
 from pathlib import Path
 import cv2
+import os
 from tqdm import tqdm
 import math 
 import sys
@@ -21,7 +23,7 @@ from typing import Optional
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
 from .ae import Autoencoder
-from .unet import UNet
+# from .unet import UNet
 from .mamba import VmambaIR
 from .data import AOSDataset
 from .similarity import SSIM
@@ -49,19 +51,22 @@ class ModelConf:
     channels: int = 128
     residual_blocks: int = 2
     residual_channels: int = 32
-    embed_dim: int = 64
+    embed_dim: int = 64  # AE latent space dim. (not conditional dim.)
     # Num. of different env. temp. but
     # if set to 0 => no conditioning used.
-    num_cond_embed: int = 0 # 31
-    arch: str = "" # "mamba", "unet", ""
+    num_cond_embed: int = 31 # 0 or 31
+    arch: str = "mamba" # "mamba", "unet", ""
 
 
 @dataclass
 class DataConf:
-    meta_path: Path = Path("/mnt/data/wildfire/IR/Batch-1.json") # Path("C:/IR/data/Batch-1.json")
+    # Path("C:/IR/data/Batch-1.json")
+    # Path("/mnt/data/wildfire/IR/Batch-1.json")
+    meta_path: Path =  Path("/home/lbrunn/projects/irdata/data/Batch-1.json")
     val_split: float = 0.1
     key: str = "area_07"
     threshold: float = 0.33
+    img_sz: Optional[int] = 128
 
 
 @dataclass
@@ -92,7 +97,6 @@ class TrainConf:
     normalize_residual: bool = False  # NOTE: has no effect if predict_imag=True
     decay_groups: bool = False
     predict_image: bool = True
-    img_sz: tuple[int] = (512, 512)
     # Select loss variations via "objective"
     objective: str = "L2"  # L2, L1, PERC, GAN; default=L2
     perc_weight: float = 0.5
@@ -111,7 +115,9 @@ class TrainConf:
     ### ###
     model: ModelConf = field(default_factory=ModelConf)
     data: DataConf = field(default_factory=DataConf)
-    runs: Path = Path("/mnt/data/wildfire/IR/runs/new")  # C:/IR/runs/autoencoder
+    # C:/IR/runs/autoencoder
+    # "/mnt/data/wildfire/IR/runs/new"
+    runs: Path = Path("/home/lbrunn/projects/irdata/runs")  
 
 
 def create_grid(
@@ -464,29 +470,30 @@ def log_images(
         dataformats="HWC",
     )
 
-    if conf.predict_image:
-        residual = gt - pred
-    else:
-        if conf.normalize_residual:
-            residual = res_std * pred_res_or_img + res_mean
-        else:
-            residual = pred_res_or_img
+    # TODO: not visualizing properly, good images bad residual visu?!
+    # if conf.predict_image:
+    #     residual = gt - pred
+    # else:
+    #     if conf.normalize_residual:
+    #         residual = res_std * pred_res_or_img + res_mean
+    #     else:
+    #         residual = pred_res_or_img
 
-    tgt = gt - aos
-    grid = create_grid(
-        conf.log_n_images,
-        residual.detach().cpu(), tgt.cpu(),
-        colormaps=[
-            cv2.COLORMAP_JET, cv2.COLORMAP_JET,
-        ],
-        min_max_idx=1,
-    )
-    writer.add_image(
-        f"{phase}/residuals",
-        np.asarray(grid),
-        global_step,
-        dataformats="HWC",
-    )
+    # tgt = gt - aos
+    # grid = create_grid(
+    #     conf.log_n_images,
+    #     residual.detach().cpu(), tgt.cpu(),
+    #     colormaps=[
+    #         cv2.COLORMAP_JET, cv2.COLORMAP_JET,
+    #     ],
+    #     min_max_idx=1,
+    # )
+    # writer.add_image(
+    #     f"{phase}/residuals",
+    #     np.asarray(grid),
+    #     global_step,
+    #     dataformats="HWC",
+    # )
 
 
 if __name__ == "__main__":
@@ -516,6 +523,8 @@ if __name__ == "__main__":
     TODO
     [] GAN loss, perceptual loss etc as in VMambaIR and VQGAN.
     """
+    print(f"Running from working directory: {os.getcwd()}")
+    
     conf = OmegaConf.merge(
         OmegaConf.structured(TrainConf()),
         OmegaConf.load("src/configs/ir/ae.yaml"),
@@ -584,41 +593,53 @@ if __name__ == "__main__":
         num_class_embeds = None if conf.model.num_cond_embed <= 0 else conf.model.num_cond_embed
         model = VmambaIR(
             1,
-            conf.img_sz,
-            (16, 32, 64),
-            (2, 2, 2),
+            (32, 64, 96),
+            (2, 2, 3),
             num_class_embeds,
-            1,
             conf.predict_image,
+            adaLN_Zero=False,
+            smooth=False,
+            local_embeds=True,
         )
+        """
+        Experiments log:
+        image size for trials is 128x128 and L1 objective
+        2025-05-23_13-04-52 unconditional
+        * 2025-05-23_13-36-49 conditional; adaLN_Zero=False
+        2025-05-23_14-55-37 conditional AE for comparison
+        2025-05-26_08-25-04 conditional; adaLN_Zero=True
+        2025-05-26_09-18-15 conditional; adaLN_Zero=False; smooth=True
+        conditional; adaLN_Zero=False; local_embeds=True
+        """
     elif conf.model.arch == "unet":
-        block_out_channels = [32, 32, 64, 64, 128]  # Stride 16
+        raise NotImplementedError
+    #     block_out_channels = [32, 32, 64, 64, 128]  # Stride 16
 
-        if conf.model.num_cond_embed > 0:
-            # A NOTE on "block_out_channels", a
-            # channel below 32 would not work due to group norm of KDowblock2D in "get_down_block"
-            # receives not the number of groups as parameter instead uses always default of 32
-            # ie. 16 instead of 32 for first channel ==> ZeroDivisionError: integer division or modulo by zero 
-            # TODO: Even more customization required to make a more efficient yet powerfull UNet arch.
-            model = UNet(
-                in_channels=1,
-                out_channels=1,
-                down_block_types=["KDownBlock2D"] * len(block_out_channels),
-                up_block_types=["KUpBlock2D"] * len(block_out_channels),
-                block_out_channels=block_out_channels,  
-                num_class_embeds=conf.model.num_cond_embed,
-                resnet_time_scale_shift="ada_group",
-                norm_num_groups=16,
-            )
-        else:
-            model = UNet(
-                in_channels=1,
-                out_channels=1,
-                down_block_types=["DownBlock2D"] * len(block_out_channels),
-                up_block_types=["UpBlock2D"] * len(block_out_channels),
-                block_out_channels=block_out_channels,
-                norm_num_groups=16,
-            )
+    #     if conf.model.num_cond_embed > 0:
+    #         # A NOTE on "block_out_channels", a
+    #         # channel below 32 would not work due to group norm of KDowblock2D in "get_down_block"
+    #         # receives not the number of groups as parameter instead uses always default of 32
+    #         # ie. 16 instead of 32 for first channel ==> ZeroDivisionError: integer division or modulo by zero 
+    #         # TODO: Even more customization required to make a more efficient yet powerfull UNet arch.
+    #         model = UNet(
+    #             in_channels=1,
+    #             out_channels=1,
+    #             down_block_types=["KDownBlock2D"] * len(block_out_channels),
+    #             up_block_types=["KUpBlock2D"] * len(block_out_channels),
+    #             block_out_channels=block_out_channels,  
+    #             num_class_embeds=conf.model.num_cond_embed,
+    #             resnet_time_scale_shift="ada_group",
+    #             norm_num_groups=16,
+    #         )
+    #     else:
+    #         model = UNet(
+    #             in_channels=1,
+    #             out_channels=1,
+    #             down_block_types=["DownBlock2D"] * len(block_out_channels),
+    #             up_block_types=["UpBlock2D"] * len(block_out_channels),
+    #             block_out_channels=block_out_channels,
+    #             norm_num_groups=16,
+    #         )
     else:
         if conf.model.gated:
             from .gated import Conv2d, ConvTranspose2d
@@ -733,15 +754,29 @@ if __name__ == "__main__":
                 gt = batch["GT"].to(accelerator.device)[:, None, :, :]
                 et = batch["ET"].to(accelerator.device)  # B, >> indices
                 
+                if conf.data.img_sz is not None:
+                    img_sz = conf.data.img_sz
+                    aos = F.interpolate(aos, size=(img_sz, img_sz))  # Bx1xHxW
+                    gt = F.interpolate(gt, size=(img_sz, img_sz))  # Bx1xHxW
+                
                 aos_normalized = (aos - aos_mean) / aos_std
                 
                 optimizer.zero_grad()
-                if model.embedding is not None:
-                    # Env. temp. as cond
-                    # NOTE: Only working with env. temp. from 0 to Tmax (integers)
-                    pred_res_or_img = model(aos_normalized, et)
-                else:
-                    pred_res_or_img = model(aos_normalized)
+                
+                # Working with env. temp. from 0 to Tmax (int) as conditions
+                if isinstance(model, VmambaIR):
+                    if model.local_embeds:  # Local embedding
+                        pred_res_or_img = model(aos_normalized, None, et)
+                    elif model.embedding is not None:  # Global embedding
+                        pred_res_or_img = model(aos_normalized, et)
+                    else:  # No embedding
+                        pred_res_or_img = model(aos_normalized)
+                else:  # Other models
+                    if model.embedding is not None:
+                        
+                        pred_res_or_img = model(aos_normalized, et)
+                    else:
+                        pred_res_or_img = model(aos_normalized)
 
                 loss = criterion(pred_res_or_img, aos, gt)
                 if not isinstance(loss, torch.Tensor):
@@ -798,13 +833,28 @@ if __name__ == "__main__":
                         gt = batch["GT"].to(accelerator.device)[:, None, :, :]
                         et = batch["ET"].to(accelerator.device)  # B, >> indices
                         idx = batch["IDX"]  # B,
+                        
+                        if conf.data.img_sz is not None:
+                            img_sz = conf.data.img_sz
+                            aos = F.interpolate(aos, size=(img_sz, img_sz))  # Bx1xHxW
+                            gt = F.interpolate(gt, size=(img_sz, img_sz))  # Bx1xHxW
 
                         aos_normalized = (aos - aos_mean) / aos_std
 
-                        if model.embedding is not None:
-                            pred_res_or_img = model(aos_normalized, et)
-                        else:
-                            pred_res_or_img = model(aos_normalized)
+                        # Working with env. temp. from 0 to Tmax (int) as conditions
+                        if isinstance(model, VmambaIR):
+                            if model.local_embeds:  # Local embedding
+                                pred_res_or_img = model(aos_normalized, None, et)
+                            elif model.embedding is not None:  # Global embedding
+                                pred_res_or_img = model(aos_normalized, et)
+                            else:  # No embedding
+                                pred_res_or_img = model(aos_normalized)
+                        else:  # Other models
+                            if model.embedding is not None:
+                               
+                                pred_res_or_img = model(aos_normalized, et)
+                            else:
+                                pred_res_or_img = model(aos_normalized)
 
                         loss = val_criterion(pred_res_or_img, aos, gt)
                         if not isinstance(loss, torch.Tensor):

@@ -55,9 +55,10 @@ class EFFN(nn.Module):
 
 class OSS(nn.Module):
 
-    def __init__(self, in_channels: int):
+    def __init__(self, in_channels: int, smooth: bool = False):
         """Omni Selective Scan (OSS)"""
         super().__init__()
+        self.smooth = smooth
         self.mamba1 = Mamba(
             # This module uses roughly 3 * expand * d_model^2 parameters
             d_model=4 * in_channels, # Model dimension d_model
@@ -76,10 +77,10 @@ class OSS(nn.Module):
     def forward(self, fo1: Tensor, fo2: Tensor):
         B, C, H, W = fo1.shape  # BxCxHxW
 
-        h_forward = to_line_scanable_sequence(fo1, False, "h_forward")  # BxLxC
-        h_backward = to_line_scanable_sequence(fo1, False, "h_backward")  # BxLxC
-        w_forward = to_line_scanable_sequence(fo1, False, "w_forward")  # BxLxC
-        w_backward = to_line_scanable_sequence(fo1, False, "w_backward")  # BxLxC
+        h_forward = to_line_scanable_sequence(fo1, self.smooth, "h_forward")  # BxLxC
+        h_backward = to_line_scanable_sequence(fo1, self.smooth, "h_backward")  # BxLxC
+        w_forward = to_line_scanable_sequence(fo1, self.smooth, "w_forward")  # BxLxC
+        w_backward = to_line_scanable_sequence(fo1, self.smooth, "w_backward")  # BxLxC
         
         fop = torch.concat([h_forward, h_backward, w_forward, w_backward], 2)  # BxLx4C
         fop = self.mamba1(fop)  # BxLx4C
@@ -103,11 +104,11 @@ class OSS(nn.Module):
 
 class OSSModule(nn.Module):
 
-    def __init__(self, in_channels: int, bias: bool = True):
+    def __init__(self, in_channels: int, bias: bool = True, smooth: bool = False):
         super().__init__()
         self.in_projection = nn.Conv2d(in_channels, 2 * in_channels, 1, 1, 0, bias=bias)
         self.dwconv = DConv(in_channels, 1, 3, 1, bias=bias)
-        self.oss = OSS(in_channels)
+        self.oss = OSS(in_channels, smooth)
         self.out_projection = nn.Conv2d(in_channels, in_channels, 1, 1, 0, bias=bias)
 
     def forward(self, x):
@@ -129,49 +130,36 @@ class OSSModule(nn.Module):
         return x
 
 
-class Norm(nn.Module):
-
-    def __init__(self, norm_type: str, in_channels: int, img_sz: tuple[int], embed_dim: Optional[int] = None):
-        super().__init__()
-        assert norm_type in ("layer", "group", "ada_group")
-
-        if norm_type == "layer":
-            # The ONLY reason we need to know spatial resolution!
-            self.norm = nn.LayerNorm((in_channels, *img_sz))  # affine per channel AND per pixel
-        elif norm_type == "group":
-            self.norm = nn.GroupNorm(get_groups(in_channels), in_channels)  # affine per channel group
-        elif norm_type == "ada_group":
-            assert embed_dim is not None
-            # TODO read more about layer vs group norm
-            # !! https://docs.pytorch.org/docs/stable/generated/torch.nn.GroupNorm.html
-            self.norm = AdaGroupNorm(embed_dim, in_channels, get_groups(in_channels))  # affine per channel group
-
-    def forward(self, x: Tensor, emb: Optional[Tensor] = None):
-        if emb is None:
-            return self.norm(x)
-        else:
-            return self.norm(x, emb)
-
-
 class OSSBlock(nn.Module):
 
     def __init__(
         self,
-        norm_type: str,
         in_channels: int,
-        img_sz: tuple[int],
         embed_dim: Optional[int] = None,
         ffn_expansion_factor: int = 2,
+        num_embeddings: Optional[int] = None,
+        zero: bool = False,  # DiT has adaLN-Zero
+        smooth: bool = False,  # Smooth line scan transitions
     ):
         super().__init__()
-        self.norm1 = Norm(norm_type, in_channels, img_sz, embed_dim)
-        self.oss_module = OSSModule(in_channels)
-        self.norm2 = Norm(norm_type, in_channels, img_sz, embed_dim)
+        self.norm1 = AdaLayerNorm(in_channels, embed_dim, num_embeddings, zero)
+        self.oss_module = OSSModule(in_channels, smooth=smooth)
+        self.norm2 = AdaLayerNorm(in_channels, embed_dim, num_embeddings, zero)
         self.effn = EFFN(in_channels, ffn_expansion_factor)
 
-    def forward(self, x: Tensor, emb: Optional[Tensor] = None):
-        x = self.oss_module(self.norm1(x, emb)) + x
-        x = self.effn(self.norm2(x, emb)) + x
+    def forward(
+        self,
+        x: Tensor,
+        emb: Optional[Tensor] = None,
+        class_labels: Optional[torch.LongTensor] = None,
+    ):
+        residual = x  # BxCxHxW
+        x, gate = self.norm1(x.permute(0, 2, 3, 1), emb, class_labels)
+        x = gate * self.oss_module(x.permute(0, 3, 1, 2)) + residual
+        
+        residual = x  # BxCxHxW
+        x, gate = self.norm2(x.permute(0, 2, 3, 1), emb, class_labels)
+        x = gate * self.effn(x.permute(0, 3, 1, 2)) + residual
         return x
     
 
@@ -180,12 +168,15 @@ class VmambaIR(nn.Module):
     def __init__(
         self,
         in_channels: int,
-        img_sz: tuple[int],
-        block_out_channels: tuple[int, ...] = (48, 96, 192, 384),
-        oss_blocks_per_scale: tuple[int, ...] = (4, 4, 6, 8),
-        num_class_embeds: Optional[int] = None,
+        block_out_channels: tuple[int, ...] = (32, 64, 96, 128),
+        oss_blocks_per_scale: tuple[int, ...] = (2, 2, 3, 4),
+        num_class_embeds: Optional[int] = None,  # Enable conditioning
         oss_refine_blocks: int = 2, 
         predict_image: bool = True,
+        ffn_expansion_factor: int = 2,
+        adaLN_Zero: bool = False,
+        smooth: bool = False,  # Smooth line scan transitions in OSS
+        local_embeds: bool = False,  # Each Norm Layer learns its own embedding table
     ):
         """
         L1 objective
@@ -202,14 +193,16 @@ class VmambaIR(nn.Module):
 
         self.conv_in = nn.Conv2d(in_channels, block_out_channels[0], 3, 1, 1)
 
+        self.local_embeds = local_embeds
+        embed_dim = None
+        self.embedding = None
+        num_embeds = None
         if num_class_embeds is not None:
-            norm_type = "ada_group"
             embed_dim = block_out_channels[0] * 4
-            self.embedding = nn.Embedding(num_class_embeds, embed_dim)
-        else:
-            norm_type = "group"
-            embed_dim = None
-            self.embedding = None
+            if local_embeds is False:
+                self.embedding = nn.Embedding(num_class_embeds, embed_dim)
+            else:
+                num_embeds = num_class_embeds
 
         self.down_blocks = nn.ModuleList([])
         self.downsample_blocks = nn.ModuleList([])
@@ -220,8 +213,6 @@ class VmambaIR(nn.Module):
         self.refine_block = None
         self.conv_out = nn.Conv2d(block_out_channels[0], in_channels, 3, 1, 1)
 
-        h, w = img_sz
-
         # down, total stride of 2^(len(block_out_channels) - 1)
         for i in range(len(block_out_channels) - 1):
             in_channels = block_out_channels[i]
@@ -229,16 +220,19 @@ class VmambaIR(nn.Module):
 
             blocks = []
             for _ in range(oss_blocks_per_scale[i]):
-                blocks.append(OSSBlock(norm_type, in_channels, (h, w), embed_dim))
+                blocks.append(OSSBlock(
+                    in_channels, embed_dim, ffn_expansion_factor, num_embeds, adaLN_Zero, smooth
+                ))
             self.down_blocks.append(CondSequential(*blocks))
 
             self.downsample_blocks.append(nn.Conv2d(in_channels, out_channels, 4, 2, 1))
-            h, w = h // 2, w // 2
 
         # mid, use last block_out_channels and oss_blocks_per_scale
         blocks = []
         for _ in range(oss_blocks_per_scale[-1]):
-            blocks.append(OSSBlock(norm_type, block_out_channels[-1], (h, w), embed_dim))
+            blocks.append(OSSBlock(
+                out_channels, embed_dim, ffn_expansion_factor, num_embeds, adaLN_Zero, smooth
+            ))
         self.mid_block = CondSequential(*blocks)
 
         # up, till input resolution
@@ -247,26 +241,33 @@ class VmambaIR(nn.Module):
             out_channels = block_out_channels[i - 1]
 
             self.upsample_blocks.append(nn.ConvTranspose2d(in_channels, out_channels, 4, 2, 1))
-            h, w = 2 * h, 2 * w
 
             self.skip_projections.append(nn.Conv2d(2 * out_channels, out_channels, 1, 1, 0))
 
             blocks = []
             for _ in range(oss_blocks_per_scale[i - 1]):
-                blocks.append(OSSBlock(norm_type, out_channels, (h, w), embed_dim))
+                blocks.append(OSSBlock(
+                    out_channels, embed_dim, ffn_expansion_factor, num_embeds, adaLN_Zero, smooth
+                ))
             self.up_blocks.append(CondSequential(*blocks))
 
         if oss_refine_blocks > 0:
             blocks = []
             for _ in range(oss_refine_blocks):
-                blocks.append(OSSBlock(norm_type, block_out_channels[0], (h, w), embed_dim))
+                blocks.append(OSSBlock(
+                    out_channels, embed_dim, ffn_expansion_factor, num_embeds, adaLN_Zero, smooth
+                ))
             self.refine_block = CondSequential(*blocks)
 
         n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"VmambaIR with {1e-6 * n_params:.3f} M parameters.")
             
-    def forward(self, x: Tensor, emb: Optional[Tensor] = None):
-        """Returns the IR residual, not restored image directly."""
+    def forward(
+        self,
+        x: Tensor,
+        emb: Optional[Tensor] = None,
+        class_labels: Optional[torch.LongTensor] = None,
+    ):
         x_input = x
 
         x = self.conv_in(x)
@@ -276,21 +277,21 @@ class VmambaIR(nn.Module):
 
         residuals = ()
         for i in range(len(self.down_blocks)):
-            x = self.down_blocks[i](x, emb)
+            x = self.down_blocks[i](x, emb, class_labels)
             residuals += (x,)
             x = self.downsample_blocks[i](x)
 
-        x = self.mid_block(x, emb)
+        x = self.mid_block(x, emb, class_labels)
 
         residuals = tuple(reversed(residuals))
         for i in range(len(self.up_blocks)):
             x = self.upsample_blocks[i](x)
             x = torch.concat((x, residuals[i]), 1)
             x = self.skip_projections[i](x)
-            x = self.up_blocks[i](x, emb)
+            x = self.up_blocks[i](x, emb, class_labels)
 
         if self.refine_block is not None:
-            x = self.refine_block(x, emb)
+            x = self.refine_block(x, emb, class_labels)
 
         x = self.conv_out(x)
 
@@ -303,11 +304,16 @@ class VmambaIR(nn.Module):
 if __name__ == "__main__":
     x = torch.randn(2, 1, 128, 128).cuda()
     emb = torch.randint(0, 31, (2,)).cuda()
+    class_labels = torch.randint(0, 31, (2,)).cuda()
 
-    model = VmambaIR(1, (128, 128), (32, 64, 96), (2, 2, 2), None).cuda()
+    model = VmambaIR(1, (32, 64, 96), (2, 2, 3), None).cuda()
     y = model(x, None)
     print(y.shape)
 
-    model = VmambaIR(1, (128, 128), (32, 64, 96), (2, 2, 2), 31).cuda()
+    model = VmambaIR(1, (32, 64, 96), (2, 2, 3), 31).cuda()
     y = model(x, emb)
+    print(y.shape)
+    
+    model = VmambaIR(1, (32, 64, 96), (2, 2, 3), 31, local_embeds=True).cuda()
+    y = model(x, None, class_labels)
     print(y.shape)

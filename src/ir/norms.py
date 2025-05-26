@@ -106,17 +106,16 @@ class AdaLayerNorm(nn.Module):
         in_channels: int,
         embedding_dim: Optional[int] = None,
         num_embeddings: Optional[int] = None,
-        bias: bool = True,  # linear layer bias for embedding transformation
         zero: bool = False,  # DiT has adaLN-Zero
+        bias: bool = True,  # linear layer bias for embedding transformation
     ):
         super().__init__()
+        self.emb = None
         if embedding_dim is None:
             self.norm = nn.LayerNorm(in_channels, elementwise_affine=True, eps=1e-6)
         else:  # adaptive
             if num_embeddings is not None:
                 self.emb = nn.Embedding(num_embeddings, embedding_dim)
-            else:
-                self.emb = None
 
             self.silu = nn.SiLU()
             self.multiplier = 3 if zero else 2
@@ -126,10 +125,13 @@ class AdaLayerNorm(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        class_labels: Optional[torch.LongTensor] = None,
         emb: Optional[torch.Tensor] = None,
+        class_labels: Optional[torch.LongTensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # NOTE: BxHxWxC
+        """
+        Expects x of shape BxHxWxC and also returns x in this shape.
+        Gate is either scalar 1.0 or of shape BxCx1x1.
+        """
         if self.emb is not None:  # AdaLayerNorm with individual embeddings.
             emb = self.emb(class_labels)
 
@@ -140,7 +142,7 @@ class AdaLayerNorm(nn.Module):
                 gate = 1.0
             else:
                 shift, scale, gate = emb.chunk(self.multiplier, dim=1)  # BxC
-                gate = gate[:, None, None, :]  # Bx1x1xC
+                gate = gate[:, :, None, None]  # BxCx1x1
             x = self.norm(x) * (1 + scale[:, None, None, :]) + shift[:, None, None, :]
             return x, gate
         else:  # Just a regular LayerNorm.
