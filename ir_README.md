@@ -9,3 +9,7 @@ source .venv/bin/activate
 pip install -r ir_requirements.txt
 
 pip install mamba-ssm[causal-conv1d] --no-build-isolation
+
+# Open directories from within WSL in Windows explorer
+
+/mnt/c/Windows/explorer.exe .

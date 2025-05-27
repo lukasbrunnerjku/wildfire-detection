@@ -1,5 +1,6 @@
 import torch.nn as nn
 import math
+from mamba_ssm import Mamba, Mamba2
 
 
 WEIGHT_DECAY_MODULES = (
@@ -65,6 +66,8 @@ def weight_decay_parameter_split(model: nn.Module) -> tuple[set, set]:
                 decay.add(fpn)
             elif pn.endswith('weight') and isinstance(m, NO_WEIGHT_DECAY_MODULES):
                 # weights of modules will NOT be weight decayed
+                no_decay.add(fpn)
+            elif (pn.endswith('D') or pn.endswith('A_log')) and isinstance(m, (Mamba, Mamba2)):
                 no_decay.add(fpn)
 
     # validate that we considered every parameter

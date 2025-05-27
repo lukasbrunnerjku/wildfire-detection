@@ -95,11 +95,11 @@ class TrainConf:
     use_ssim: bool = False
     residual_target: bool = True  # NOTE: has no effect if predict_imag=True
     normalize_residual: bool = False  # NOTE: has no effect if predict_imag=True
-    decay_groups: bool = False
+    decay_groups: bool = True  # TODO
     predict_image: bool = True
     # Select loss variations via "objective"
-    objective: str = "L2"  # L2, L1, PERC, GAN; default=L2
-    perc_weight: float = 0.5
+    objective: str = "PERC"  # L2, L1, PERC, GAN; default=L2
+    perc_weight: float = 2.0
     l1_weight: float = 1.0
     # Perceptual Loss (predict_image must be True!)
     resnet_type: str = "resnet18"
@@ -196,10 +196,12 @@ class ImageCriterion(nn.Module):
         aos_mean: Optional[float] = None,
         aos_std: Optional[float] = None,
         # Select loss variations via "objective"
-        objective: str = "L1",
+        objective: str = "L2",
         # Perceptual Loss
         resnet_type: str = "resnet18",
         up_to_layer: Optional[int] = 2,
+        perc_weight: float = 0.5,
+        l1_weight: float = 1.0,
         # GAN loss
         start_epoch: int = 10,
         disc_weight: float = 0.1,
@@ -214,6 +216,8 @@ class ImageCriterion(nn.Module):
         self.aos_mean = aos_mean
         self.aos_std = aos_std
         self.objective = objective
+        self.perc_weight = perc_weight
+        self.l1_weight = l1_weight
 
         if objective == "L2":
             self.mse = nn.MSELoss(reduction="none")
@@ -273,15 +277,22 @@ class ImageCriterion(nn.Module):
             return {"total_loss": total_loss}
 
         elif self.objective == "PERC":
-
+            l1_loss = self.mae(pred_img, gt).mean()
+            gt_norm = (gt - self.aos_mean) / self.aos_std
+            perc_loss = self.perc(pred_img_norm, gt_norm)
+            total_loss = self.l1_weight * l1_loss + self.perc_weight * perc_loss
             return {
                 "total_loss": total_loss,
+                "l1_loss": l1_loss,
+                "perc_loss": perc_loss,
             }
         
         elif self.objective == "GAN":
 
             return {
                 "total_loss": total_loss,
+                "l1_loss": l1_loss,
+                "perc_loss": perc_loss,
             }
     
 
@@ -518,7 +529,7 @@ if __name__ == "__main__":
     [-] is unet better suited if predicting image directly instead of residual?
     => no matter what unet is worse till now
 
-    [---????] let models predict image directly instead of residual prediction TODO: buggy visu residual?
+    [---????] let models predict image directly instead of residual prediction
 
     TODO
     [] GAN loss, perceptual loss etc as in VMambaIR and VQGAN.
@@ -599,17 +610,29 @@ if __name__ == "__main__":
             conf.predict_image,
             adaLN_Zero=False,
             smooth=False,
-            local_embeds=True,
+            local_embeds=False,
         )
         """
         Experiments log:
-        image size for trials is 128x128 and L1 objective
+        
+        - image size for trials is 128x128 and L2 objective
         2025-05-23_13-04-52 unconditional
         * 2025-05-23_13-36-49 conditional; adaLN_Zero=False
         2025-05-23_14-55-37 conditional AE for comparison
         2025-05-26_08-25-04 conditional; adaLN_Zero=True
         2025-05-26_09-18-15 conditional; adaLN_Zero=False; smooth=True
-        conditional; adaLN_Zero=False; local_embeds=True
+        2025-05-26_11-23-38 conditional; adaLN_Zero=False; local_embeds=True
+        ** 2025-05-26_12-29-34 conditional; adaLN_Zero=False; decay_groups=True
+        
+        * is a bit better than **
+        
+        - image size for trials is 128x128 and **
+            2025-05-26_18-00-09 L1 objective (improvement)
+            2025-05-27_14-54-51 PERC objective
+            GAN objective
+            
+        - vqvae encodings of 128x128 as input, output of 512x512 after vqvae decoder
+        
         """
     elif conf.model.arch == "unet":
         raise NotImplementedError
@@ -700,6 +723,8 @@ if __name__ == "__main__":
             objective=conf.objective,
             resnet_type=conf.resnet_type,
             up_to_layer=conf.up_to_layer,
+            perc_weight=conf.perc_weight,
+            l1_weight=conf.l1_weight,
             start_epoch=conf.start_epoch,
             disc_weight=conf.disc_weight,
             adaptive_weight=conf.adaptive_weight,
@@ -780,7 +805,21 @@ if __name__ == "__main__":
 
                 loss = criterion(pred_res_or_img, aos, gt)
                 if not isinstance(loss, torch.Tensor):
-                    loss = loss["total_loss"] 
+                    loss_dict = loss  # Actually a dictionary.
+                    loss = loss_dict["total_loss"]
+                    
+                    if global_step % conf.log_every == 0:
+                        writer.add_scalar("train/total_loss", loss.item(), global_step)
+                        if conf.objective == "PERC":
+                            l1_loss = loss_dict["l1_loss"]
+                            perc_loss = loss_dict["perc_loss"]
+                            writer.add_scalar("train/l1_loss", l1_loss, global_step)
+                            writer.add_scalar("train/perc_loss", perc_loss, global_step)
+                        elif conf.objective == "GAN":
+                            l1_loss = loss_dict["l1_loss"]
+                            perc_loss = loss_dict["perc_loss"]
+                            writer.add_scalar("train/l1_loss", l1_loss, global_step)
+                            writer.add_scalar("train/perc_loss", perc_loss, global_step)
                 
                 accelerator.backward(loss)
                 optimizer.step()
@@ -793,10 +832,8 @@ if __name__ == "__main__":
 
                 if global_step % conf.log_every == 0:
                     lr = optimizer.param_groups[0]["lr"]
-                    pbar.set_postfix({
-                        "loss": f"{loss.item():.3e}",
-                        "lr": f"{lr:.3e}",
-                    })
+                    writer.add_scalar("train/lr", lr, global_step)
+                    pbar.set_postfix({"total_loss": f"{loss.item():.3e}"})
                 
                 if global_step % conf.vis_every == 0:
                     log_images(

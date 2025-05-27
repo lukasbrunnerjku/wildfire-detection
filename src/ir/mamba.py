@@ -14,7 +14,7 @@ from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional
-from mamba_ssm import Mamba  # TODO Mamba or Mamba2 ?
+from mamba_ssm import Mamba, Mamba2
 
 from .scan import to_line_scanable_sequence
 from .norms import AdaLayerNorm
