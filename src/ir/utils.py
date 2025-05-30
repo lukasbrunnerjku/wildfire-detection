@@ -84,7 +84,7 @@ def drone_flight_gif(
     print(f"GIF created successfully and saved to {output_path}")
 
 
-def load_xy(dir: Path) -> tuple[Tensor, Tensor]:
+def load_xy(dir: Path, normalized: bool = False) -> tuple[Tensor, Tensor]:
     """
     x ... input image; =AOS image; in Kelvin; HxW
     y ... GT image; =floor texture; in Kelvin; HxW
@@ -108,11 +108,19 @@ def load_xy(dir: Path) -> tuple[Tensor, Tensor]:
             max_temp = max(max_temps)
             # Store preprocessed min/max temperatures.
             write_min_max(min_max_file, min_temp, max_temp)
-                
-    x = torch.from_numpy(cv2.imread(
-        str(dir / "integrall_0.png"), -1
-    )[:, :, 0].astype(np.float32))  # in [0, 255]; pixel
+
+    if normalized:
+        x = torch.from_numpy(cv2.imread(
+            str(dir / "integrall_normalized_0.png"), -1
+        )[:, :, 0].astype(np.float32))  # in [0, 255]; pixel
+        min_temp, max_temp = read_min_max(dir / "global_min_max_temp.txt")
+    else:
+        x = torch.from_numpy(cv2.imread(
+            str(dir / "integrall_0.png"), -1
+        )[:, :, 0].astype(np.float32))  # in [0, 255]; pixel
+    
     x = ((max_temp - min_temp) * (x / 255)) + min_temp  # in Kelvin
+        
     return x, y
 
 

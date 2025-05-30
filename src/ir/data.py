@@ -14,7 +14,10 @@ class AOSDataset(Dataset):
         meta_path: Optional[Path] = None,
         key: str = "score",
         threshold: float = 0.33,
+        normalized: bool = False,
     ):
+        self.normalized = normalized
+        
         if folders is not None and meta_path is not None:
             raise ValueError("Either folders or meta_path must be provided, not both.")
         
@@ -37,7 +40,7 @@ class AOSDataset(Dataset):
     def __getitem__(self, idx):
         folder = self.folders[idx]  # ie. /Batch-1/27/abc30f62e9ba47cab97c3ef3850a114d
         et = int(folder.parent.name)  # Environment Temperature (ET)
-        x, y = load_xy(folder)
+        x, y = load_xy(folder, normalized=self.normalized)
         return {
             "AOS": x,
             "GT": y,

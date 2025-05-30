@@ -8,7 +8,8 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root1", default="C:/IR/data/Batch-1")
+    # Copy files from root2 to root1
+    parser.add_argument("--root1", default=r"\\wsl.localhost\Ubuntu-24.04\home\lbrunn\projects\irdata\data\Batch-1")  # "C:/IR/data/Batch-1"
     parser.add_argument("--root2", default="C:/Users/lbrunn/Downloads/Correct/Batch-1")
     args = parser.parse_args()
     
@@ -35,7 +36,6 @@ if __name__ == "__main__":
         
         # image1 = plt.imread(image1)
         # image2 = plt.imread(image2)
-        
         # fig, (ax1, ax2) = plt.subplots(1, 2)
         # ax1.imshow(image1)
         # ax2.imshow(image2)

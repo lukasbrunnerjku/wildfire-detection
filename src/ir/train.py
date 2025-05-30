@@ -66,6 +66,7 @@ class DataConf:
     val_split: float = 0.1
     key: str = "area_07"
     threshold: float = 0.33
+    normalized: bool = True
     img_sz: Optional[int] = 128
 
 
@@ -558,6 +559,7 @@ if __name__ == "__main__":
         conf.data.meta_path,
         conf.data.key,
         conf.data.threshold,
+        conf.data.normalized,
     ).split(conf.data.val_split, conf.seed)  # Train/Val split
     print(f"Number of training samples: {len(dataset)}")
     print(f"Number of validation samples: {len(val_dataset)}")
@@ -574,7 +576,8 @@ if __name__ == "__main__":
     th = conf.data.threshold
     th = "_".join(f"{th}".split("."))  # ie. 0.33 => "0_33"
     key = conf.data.key
-    stats_path = conf.data.meta_path.parent / f"fn_{fn}_key_{key}_th_{th}.json"
+    nm = int(conf.data.normalized)  # 0 ... not normalized
+    stats_path = conf.data.meta_path.parent / f"fn_{fn}_key_{key}_th_{th}_nm_{nm}.json"
     
     if stats_path.exists():
         print(f"Loading stats from: {stats_path=}")
@@ -628,7 +631,7 @@ if __name__ == "__main__":
         
         - image size for trials is 128x128 and **
             2025-05-26_18-00-09 L1 objective (improvement)
-            2025-05-27_14-54-51 PERC objective
+            2025-05-27_14-54-51 PERC objective (more improvement)
             GAN objective
             
         - vqvae encodings of 128x128 as input, output of 512x512 after vqvae decoder
