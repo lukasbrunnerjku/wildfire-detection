@@ -65,5 +65,11 @@
             "request": "launch",
             "module": "src.ir.mamba"
         },
+        {
+            "name": "compare",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.ir.compare"
+        },
     ]
 }
