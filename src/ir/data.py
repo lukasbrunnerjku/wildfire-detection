@@ -15,7 +15,10 @@ class AOSDataset(Dataset):
         key: str = "score",
         threshold: float = 0.33,
         normalized: bool = False,
+        # NOTE: If an argument is added here, do so in the ".split" method constructors!
     ):
+        self.key = key
+        self.threshold = threshold
         self.normalized = normalized
         
         if folders is not None and meta_path is not None:
@@ -59,7 +62,23 @@ class AOSDataset(Dataset):
         random.shuffle(self.folders)
         train_folders = self.folders[:-n_val]
         val_folders = self.folders[-n_val:]
-        return AOSDataset(train_folders), AOSDataset(val_folders)
+        
+        # NOTE: Add new argument here!
+        train_ds = AOSDataset(
+            train_folders,
+            None,
+            self.key,
+            self.threshold,
+            self.normalized,
+        )
+        val_ds = AOSDataset(
+            val_folders,
+            None,
+            self.key,
+            self.threshold,
+            self.normalized,
+        )
+        return train_ds, val_ds 
 
 
 if __name__ == "__main__":
