@@ -1,6 +1,7 @@
 import torch.nn as nn
 import math
 from mamba_ssm import Mamba, Mamba2
+from mamba_ssm.ops.triton.layernorm_gated import RMSNorm
 
 
 WEIGHT_DECAY_MODULES = (
@@ -34,6 +35,7 @@ ALL_NORMS = (
     nn.InstanceNorm3d,
     nn.GroupNorm,
     nn.LocalResponseNorm,
+    RMSNorm,
 )
 
 NO_WEIGHT_DECAY_MODULES = (

@@ -12,3 +12,4 @@ omegaconf
 torchmetrics
 matplotlib
 scikit-image
+timm==1.0.15

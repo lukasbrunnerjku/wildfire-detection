@@ -15,7 +15,8 @@
             "name": "train",
             "type": "debugpy",
             "request": "launch",
-            "module": "src.ir.train"
+            "module": "src.ir.train",
+            "justMyCode": false
         },
         {
             "name": "preprocess",
@@ -70,6 +71,12 @@
             "type": "debugpy",
             "request": "launch",
             "module": "src.ir.compare"
+        },
+        {
+            "name": "mambaout",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.ir.mambaout"
         },
     ]
 }

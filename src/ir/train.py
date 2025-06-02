@@ -25,6 +25,7 @@ from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMe
 from .ae import Autoencoder
 # from .unet import UNet
 from .mamba import VmambaIR
+from .mambaout import MambaOutIR
 from .data import AOSDataset
 from .similarity import SSIM
 from .utils import load_center_view, drone_flight_gif
@@ -55,7 +56,7 @@ class ModelConf:
     # Num. of different env. temp. but
     # if set to 0 => no conditioning used.
     num_cond_embed: int = 31 # 0 or 31
-    arch: str = "mamba" # "mamba", "unet", ""
+    arch: str = "mambaout" # "mambaout", "mamba", "unet", ""
 
 
 @dataclass
@@ -610,10 +611,12 @@ if __name__ == "__main__":
             (32, 64, 96),
             (2, 2, 3),
             num_class_embeds,
-            conf.predict_image,
+            oss_refine_blocks=2,
+            predict_image=conf.predict_image,
             adaLN_Zero=False,
             smooth=False,
             local_embeds=False,
+            mamba_v2=False,  # TODO
         )
         """
         Experiments log:
@@ -636,6 +639,25 @@ if __name__ == "__main__":
             
         - vqvae encodings of 128x128 as input, output of 512x512 after vqvae decoder
         
+        """
+    elif conf.model.arch == "mambaout":
+        num_class_embeds = None if conf.model.num_cond_embed <= 0 else conf.model.num_cond_embed
+        model = MambaOutIR(
+            1,
+            (64, 128, 256),
+            (2, 2, 3),
+            num_class_embeds,
+            oss_refine_blocks=2,
+            predict_image=conf.predict_image,
+            local_embeds=False,
+            drop_path=0.2,
+        )
+        """
+        128x128 PREC objective conditional
+        2025-06-02_12-43-06 drop_path 0.0 ~0.9 Million Params
+        2025-06-02_12-59-54 drop_path 0.0 ~4.6 Million Params (5GB VRAM training)
+        2025-06-02_14-39-42 drop_path 0.1 ~4.6 Million Params
+        2025-06-02_15-03-44 drop_path 0.2 ~4.6 Million Params (Best so far!)
         """
     elif conf.model.arch == "unet":
         raise NotImplementedError

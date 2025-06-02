@@ -55,24 +55,42 @@ class EFFN(nn.Module):
 
 class OSS(nn.Module):
 
-    def __init__(self, in_channels: int, smooth: bool = False):
+    def __init__(self, in_channels: int, smooth: bool = False, mamba_v2: bool = False):
         """Omni Selective Scan (OSS)"""
         super().__init__()
         self.smooth = smooth
-        self.mamba1 = Mamba(
-            # This module uses roughly 3 * expand * d_model^2 parameters
-            d_model=4 * in_channels, # Model dimension d_model
-            d_state=16,  # SSM state expansion factor
-            d_conv=4,    # Local convolution width
-            expand=2,    # Block expansion factor
-        )
-        self.mamba2 = Mamba(
-            # This module uses roughly 3 * expand * d_model^2 parameters
-            d_model=2, # Model dimension d_model
-            d_state=16,  # SSM state expansion factor
-            d_conv=4,    # Local convolution width
-            expand=2,    # Block expansion factor
-        )
+        if mamba_v2:
+            self.mamba1 = Mamba2(
+                # This module uses roughly 3 * expand * d_model^2 parameters
+                d_model=4 * in_channels, # Model dimension d_model
+                d_state=16,  # SSM state expansion factor
+                d_conv=4,    # Local convolution width
+                expand=2,    # Block expansion factor
+                headdim=int(4 * in_channels / 2),
+            )
+            self.mamba2 = Mamba2(
+                # This module uses roughly 3 * expand * d_model^2 parameters
+                d_model=2, # Model dimension d_model
+                d_state=16,  # SSM state expansion factor
+                d_conv=4,    # Local convolution width
+                expand=2,    # Block expansion factor
+                headdim=2,
+            )
+        else:
+            self.mamba1 = Mamba(
+                # This module uses roughly 3 * expand * d_model^2 parameters
+                d_model=4 * in_channels, # Model dimension d_model
+                d_state=16,  # SSM state expansion factor
+                d_conv=4,    # Local convolution width
+                expand=2,    # Block expansion factor
+            )
+            self.mamba2 = Mamba(
+                # This module uses roughly 3 * expand * d_model^2 parameters
+                d_model=2, # Model dimension d_model
+                d_state=16,  # SSM state expansion factor
+                d_conv=4,    # Local convolution width
+                expand=2,    # Block expansion factor
+            )
 
     def forward(self, fo1: Tensor, fo2: Tensor):
         B, C, H, W = fo1.shape  # BxCxHxW
@@ -104,11 +122,11 @@ class OSS(nn.Module):
 
 class OSSModule(nn.Module):
 
-    def __init__(self, in_channels: int, bias: bool = True, smooth: bool = False):
+    def __init__(self, in_channels: int, bias: bool = True, smooth: bool = False, mamba_v2: bool = False):
         super().__init__()
         self.in_projection = nn.Conv2d(in_channels, 2 * in_channels, 1, 1, 0, bias=bias)
         self.dwconv = DConv(in_channels, 1, 3, 1, bias=bias)
-        self.oss = OSS(in_channels, smooth)
+        self.oss = OSS(in_channels, smooth, mamba_v2)
         self.out_projection = nn.Conv2d(in_channels, in_channels, 1, 1, 0, bias=bias)
 
     def forward(self, x):
@@ -140,10 +158,11 @@ class OSSBlock(nn.Module):
         num_embeddings: Optional[int] = None,
         zero: bool = False,  # DiT has adaLN-Zero
         smooth: bool = False,  # Smooth line scan transitions
+        mamba_v2: bool = False,
     ):
         super().__init__()
         self.norm1 = AdaLayerNorm(in_channels, embed_dim, num_embeddings, zero)
-        self.oss_module = OSSModule(in_channels, smooth=smooth)
+        self.oss_module = OSSModule(in_channels, smooth=smooth, mamba_v2=mamba_v2)
         self.norm2 = AdaLayerNorm(in_channels, embed_dim, num_embeddings, zero)
         self.effn = EFFN(in_channels, ffn_expansion_factor)
 
@@ -177,6 +196,7 @@ class VmambaIR(nn.Module):
         adaLN_Zero: bool = False,
         smooth: bool = False,  # Smooth line scan transitions in OSS
         local_embeds: bool = False,  # Each Norm Layer learns its own embedding table
+        mamba_v2: bool = False,
     ):
         """
         L1 objective
@@ -221,7 +241,13 @@ class VmambaIR(nn.Module):
             blocks = []
             for _ in range(oss_blocks_per_scale[i]):
                 blocks.append(OSSBlock(
-                    in_channels, embed_dim, ffn_expansion_factor, num_embeds, adaLN_Zero, smooth
+                    in_channels,
+                    embed_dim,
+                    ffn_expansion_factor,
+                    num_embeds,
+                    adaLN_Zero,
+                    smooth,
+                    mamba_v2,
                 ))
             self.down_blocks.append(CondSequential(*blocks))
 
@@ -231,7 +257,13 @@ class VmambaIR(nn.Module):
         blocks = []
         for _ in range(oss_blocks_per_scale[-1]):
             blocks.append(OSSBlock(
-                out_channels, embed_dim, ffn_expansion_factor, num_embeds, adaLN_Zero, smooth
+                out_channels,
+                embed_dim,
+                ffn_expansion_factor,
+                num_embeds,
+                adaLN_Zero,
+                smooth,
+                mamba_v2,
             ))
         self.mid_block = CondSequential(*blocks)
 
@@ -247,7 +279,13 @@ class VmambaIR(nn.Module):
             blocks = []
             for _ in range(oss_blocks_per_scale[i - 1]):
                 blocks.append(OSSBlock(
-                    out_channels, embed_dim, ffn_expansion_factor, num_embeds, adaLN_Zero, smooth
+                    out_channels,
+                    embed_dim,
+                    ffn_expansion_factor,
+                    num_embeds,
+                    adaLN_Zero,
+                    smooth,
+                    mamba_v2,
                 ))
             self.up_blocks.append(CondSequential(*blocks))
 
@@ -255,7 +293,13 @@ class VmambaIR(nn.Module):
             blocks = []
             for _ in range(oss_refine_blocks):
                 blocks.append(OSSBlock(
-                    out_channels, embed_dim, ffn_expansion_factor, num_embeds, adaLN_Zero, smooth
+                    out_channels,
+                    embed_dim,
+                    ffn_expansion_factor,
+                    num_embeds,
+                    adaLN_Zero,
+                    smooth,
+                    mamba_v2,
                 ))
             self.refine_block = CondSequential(*blocks)
 
