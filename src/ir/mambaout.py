@@ -9,6 +9,51 @@ from .norms import AdaLayerNorm
 from .model_utils import CondSequential
 
 
+class StemLayer(nn.Module):
+    r""" Code modified from InternImage:
+        https://github.com/OpenGVLab/InternImage
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 1,
+        out_channels: int = 64,
+        embed_dim: Optional[int] = None,
+        num_embeddings: Optional[int] = None,
+    ):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channels,
+                               out_channels // 2,
+                               kernel_size=4,
+                               stride=2,
+                               padding=1)
+        self.norm1 = AdaLayerNorm(out_channels // 2, embed_dim, num_embeddings)
+        self.act = nn.GELU()
+        self.conv2 = nn.Conv2d(out_channels // 2,
+                               out_channels,
+                               kernel_size=4,
+                               stride=2,
+                               padding=1)
+        self.norm2 = AdaLayerNorm(out_channels, embed_dim, num_embeddings)
+
+    def forward(
+        self,
+        x: Tensor,
+        emb: Optional[Tensor] = None,
+        class_labels: Optional[torch.LongTensor] = None,
+    ):  # BxCxHxW
+        x = self.conv1(x)
+        x = x.permute(0, 2, 3, 1)  # BxHxWxC
+        x, gate = self.norm1(x, emb, class_labels)  # We do not use this gate!
+        x = x.permute(0, 3, 1, 2)  # BxCxHxW
+        x = self.act(x)
+        x = self.conv2(x)
+        x = x.permute(0, 2, 3, 1)  # BxHxWxC
+        x, gate = self.norm2(x, emb, class_labels)  # We do not use this gate!
+        x = x.permute(0, 3, 1, 2)  # BxCxHxW
+        return x
+
+
 class GatedCNNBlock(nn.Module):
     r""" Our implementation of Gated CNN Block: https://arxiv.org/pdf/1612.08083
     Args: 
@@ -54,7 +99,19 @@ class GatedCNNBlock(nn.Module):
         x = self.drop_path(x)
         return x + shortcut # [B, H, W, C]
 
-            
+
+class EfficientUpsampleBlock(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, upscale_factor: int):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels * (upscale_factor ** 2), 3, 1, 1)
+        self.pixel_shuffle = nn.PixelShuffle(upscale_factor)
+
+    def forward(self, x):  # BxCxHxW
+        x = self.conv(x)                # (B, C*r^2, H, W)
+        x = self.pixel_shuffle(x)       # (B, C, H*r, W*r)
+        return x
+    
+    
 class MambaOutIR(nn.Module):
 
     def __init__(
@@ -67,14 +124,13 @@ class MambaOutIR(nn.Module):
         predict_image: bool = True,
         local_embeds: bool = False,  # Each Norm Layer learns its own embedding table
         drop_path: float = 0.,
+        with_stem: bool = False,
     ):
         super().__init__()
         if len(block_out_channels) != len(oss_blocks_per_scale):
             raise ValueError("Must provide same number of `block_out_channels` and `oss_blocks_per_scale`")
 
         self.predict_image = predict_image  # Residual or restored image?
-
-        self.conv_in = nn.Conv2d(in_channels, block_out_channels[0], 3, 1, 1)
 
         self.local_embeds = local_embeds
         embed_dim = None
@@ -86,6 +142,22 @@ class MambaOutIR(nn.Module):
                 self.embedding = nn.Embedding(num_class_embeds, embed_dim)
             else:
                 num_embeds = num_class_embeds
+                
+        if with_stem:
+            self.conv_in = StemLayer(
+                in_channels,
+                block_out_channels[0],
+                embed_dim,
+                num_embeds,
+            )
+            self.conv_out = EfficientUpsampleBlock(
+                block_out_channels[0],
+                in_channels,
+                upscale_factor=4,
+            )
+        else:
+            self.conv_in = nn.Conv2d(in_channels, block_out_channels[0], 3, 1, 1)  
+            self.conv_out = nn.Conv2d(block_out_channels[0], in_channels, 3, 1, 1)
 
         self.down_blocks = nn.ModuleList([])
         self.downsample_blocks = nn.ModuleList([])
@@ -94,8 +166,7 @@ class MambaOutIR(nn.Module):
         self.upsample_blocks = nn.ModuleList([])
         self.skip_projections = nn.ModuleList([])
         self.refine_block = None
-        self.conv_out = nn.Conv2d(block_out_channels[0], in_channels, 3, 1, 1)
-
+        
         # down, total stride of 2^(len(block_out_channels) - 1)
         for i in range(len(block_out_channels) - 1):
             in_channels = block_out_channels[i]

@@ -68,7 +68,7 @@ class DataConf:
     key: str = "area_07"
     threshold: float = 0.33
     normalized: bool = True
-    img_sz: Optional[int] = 128
+    img_sz: Optional[int] = 512 # 128, 512
 
 
 @dataclass
@@ -651,13 +651,17 @@ if __name__ == "__main__":
             predict_image=conf.predict_image,
             local_embeds=False,
             drop_path=0.2,
+            with_stem=True,
         )
         """
         128x128 PREC objective conditional
         2025-06-02_12-43-06 drop_path 0.0 ~0.9 Million Params
-        2025-06-02_12-59-54 drop_path 0.0 ~4.6 Million Params (5GB VRAM training)
+        2025-06-02_12-59-54 drop_path 0.0 ~4.6 Million Params (5.3GB VRAM training)
         2025-06-02_14-39-42 drop_path 0.1 ~4.6 Million Params
         2025-06-02_15-03-44 drop_path 0.2 ~4.6 Million Params (Best so far!)
+        
+        512x512 "with_stem" ~4.6 Million Params (5.9GB VRAM training)
+        2025-06-02_16-12-06 drop_path 0.2
         """
     elif conf.model.arch == "unet":
         raise NotImplementedError
