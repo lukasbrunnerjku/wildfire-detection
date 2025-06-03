@@ -120,8 +120,7 @@ class MambaOutIR(nn.Module):
         block_out_channels: tuple[int, ...] = (32, 64, 96, 128),
         oss_blocks_per_scale: tuple[int, ...] = (2, 2, 3, 4),
         num_class_embeds: Optional[int] = None,  # Enable conditioning
-        oss_refine_blocks: int = 2, 
-        predict_image: bool = True,
+        oss_refine_blocks: int = 2,
         local_embeds: bool = False,  # Each Norm Layer learns its own embedding table
         drop_path: float = 0.,
         with_stem: bool = False,
@@ -129,8 +128,6 @@ class MambaOutIR(nn.Module):
         super().__init__()
         if len(block_out_channels) != len(oss_blocks_per_scale):
             raise ValueError("Must provide same number of `block_out_channels` and `oss_blocks_per_scale`")
-
-        self.predict_image = predict_image  # Residual or restored image?
 
         self.local_embeds = local_embeds
         embed_dim = None
@@ -239,6 +236,7 @@ class MambaOutIR(nn.Module):
         x: Tensor,
         emb: Optional[Tensor] = None,
         class_labels: Optional[torch.LongTensor] = None,
+        add_residual: bool = True,
     ):
         x_input = x  # BxCxHxW
 
@@ -275,7 +273,7 @@ class MambaOutIR(nn.Module):
         
         x = self.conv_out(x)
 
-        if self.predict_image:
+        if add_residual:
             x = x + x_input
 
         return x  # BxCxHxW

@@ -327,7 +327,7 @@ class Autoencoder(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def forward(self, x, cond=None):
+    def forward(self, x, cond=None, add_residual: bool = False):
         # x ... BxCxHxW >> input image (aos)
         # cond ... B, >> indices of embedding table
         if self.embedding:
@@ -337,7 +337,11 @@ class Autoencoder(nn.Module):
         else:
             h = self.enc_proj(self.encoder(x))
             y = self.decoder(h)
-        return y
+        
+        if add_residual:
+            return x + y
+        else:
+            return y
     
 
 if __name__ == "__main__":

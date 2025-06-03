@@ -56,7 +56,7 @@ class ModelConf:
     # Num. of different env. temp. but
     # if set to 0 => no conditioning used.
     num_cond_embed: int = 31 # 0 or 31
-    arch: str = "mambaout" # "mambaout", "mamba", "unet", ""
+    arch: str = "" # "mambaout", "mamba", "unet", ""
 
 
 @dataclass
@@ -67,7 +67,7 @@ class DataConf:
     val_split: float = 0.1
     key: str = "area_07"
     threshold: float = 0.33
-    normalized: bool = True
+    normalized: bool = False
     img_sz: Optional[int] = 512 # 128, 512
 
 
@@ -99,6 +99,7 @@ class TrainConf:
     normalize_residual: bool = False  # NOTE: has no effect if predict_imag=True
     decay_groups: bool = True  # TODO
     predict_image: bool = True
+    add_residual: bool = False
     # Select loss variations via "objective"
     objective: str = "PERC"  # L2, L1, PERC, GAN; default=L2
     perc_weight: float = 2.0
@@ -612,7 +613,6 @@ if __name__ == "__main__":
             (2, 2, 3),
             num_class_embeds,
             oss_refine_blocks=2,
-            predict_image=conf.predict_image,
             adaLN_Zero=False,
             smooth=False,
             local_embeds=False,
@@ -648,20 +648,30 @@ if __name__ == "__main__":
             (2, 2, 3),
             num_class_embeds,
             oss_refine_blocks=2,
-            predict_image=conf.predict_image,
             local_embeds=False,
             drop_path=0.2,
             with_stem=True,
         )
         """
-        128x128 PREC objective conditional
-        2025-06-02_12-43-06 drop_path 0.0 ~0.9 Million Params
-        2025-06-02_12-59-54 drop_path 0.0 ~4.6 Million Params (5.3GB VRAM training)
-        2025-06-02_14-39-42 drop_path 0.1 ~4.6 Million Params
-        2025-06-02_15-03-44 drop_path 0.2 ~4.6 Million Params (Best so far!)
+        PREC objective conditional
         
-        512x512 "with_stem" ~4.6 Million Params (5.9GB VRAM training)
-        2025-06-02_16-12-06 drop_path 0.2
+        128x128 
+        2025-06-02_12-43-06 drop_path 0.0 ~0.9 Million Params
+        2025-06-02_12-59-54 drop_path 0.0 ~4.6 Million Params 
+        2025-06-02_14-39-42 drop_path 0.1 ~4.6 Million Params
+        2025-06-02_15-03-44 drop_path 0.2 ~4.6 Million Params (5.3GB VRAM)
+        
+        512x512 normalized=True
+        2025-06-02_16-12-06 drop_path 0.2 "with_stem" ~4.6 Million Params (5.9GB VRAM)
+        2025-06-03_10-11-53 AE ~0.6 Million Params (9GB VRAM)
+        
+        512x512 normalized=False
+        2025-06-03_13-30-44 AE ~0.6 Million Params (9GB VRAM)
+        2025-06-03_14-10-19 drop_path 0.2 "with_stem" ~4.6 Million Params (7.2GB VRAM)
+        2025-06-03_15-14-04 add_residual=True AE
+        2025-06-03_15-51-29 add_residual=False MambaOutIR
+        
+        => normalized then add_residual otherwise do not add
         """
     elif conf.model.arch == "unet":
         raise NotImplementedError
@@ -818,19 +828,18 @@ if __name__ == "__main__":
                 optimizer.zero_grad()
                 
                 # Working with env. temp. from 0 to Tmax (int) as conditions
-                if isinstance(model, VmambaIR):
+                if isinstance(model, (VmambaIR, MambaOutIR)):
                     if model.local_embeds:  # Local embedding
-                        pred_res_or_img = model(aos_normalized, None, et)
+                        pred_res_or_img = model(aos_normalized, None, et, conf.add_residual)
                     elif model.embedding is not None:  # Global embedding
-                        pred_res_or_img = model(aos_normalized, et)
+                        pred_res_or_img = model(aos_normalized, et, None, conf.add_residual)
                     else:  # No embedding
-                        pred_res_or_img = model(aos_normalized)
+                        pred_res_or_img = model(aos_normalized, None, None, conf.add_residual)
                 else:  # Other models
                     if model.embedding is not None:
-                        
-                        pred_res_or_img = model(aos_normalized, et)
+                        pred_res_or_img = model(aos_normalized, et, conf.add_residual)
                     else:
-                        pred_res_or_img = model(aos_normalized)
+                        pred_res_or_img = model(aos_normalized, None, conf.add_residual)
 
                 loss = criterion(pred_res_or_img, aos, gt)
                 if not isinstance(loss, torch.Tensor):

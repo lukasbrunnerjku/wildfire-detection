@@ -190,8 +190,7 @@ class VmambaIR(nn.Module):
         block_out_channels: tuple[int, ...] = (32, 64, 96, 128),
         oss_blocks_per_scale: tuple[int, ...] = (2, 2, 3, 4),
         num_class_embeds: Optional[int] = None,  # Enable conditioning
-        oss_refine_blocks: int = 2, 
-        predict_image: bool = True,
+        oss_refine_blocks: int = 2,
         ffn_expansion_factor: int = 2,
         adaLN_Zero: bool = False,
         smooth: bool = False,  # Smooth line scan transitions in OSS
@@ -208,8 +207,6 @@ class VmambaIR(nn.Module):
         super().__init__()
         if len(block_out_channels) != len(oss_blocks_per_scale):
             raise ValueError("Must provide same number of `block_out_channels` and `oss_blocks_per_scale`")
-
-        self.predict_image = predict_image  # Residual or restored image?
 
         self.conv_in = nn.Conv2d(in_channels, block_out_channels[0], 3, 1, 1)
 
@@ -311,6 +308,7 @@ class VmambaIR(nn.Module):
         x: Tensor,
         emb: Optional[Tensor] = None,
         class_labels: Optional[torch.LongTensor] = None,
+        add_residual: bool = True,
     ):
         x_input = x
 
@@ -339,7 +337,7 @@ class VmambaIR(nn.Module):
 
         x = self.conv_out(x)
 
-        if self.predict_image:
+        if add_residual:
             x = x + x_input
 
         return x
