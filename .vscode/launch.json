@@ -58,7 +58,10 @@
             "name": "inference",
             "type": "debugpy",
             "request": "launch",
-            "module": "src.ir.inference"
+            "module": "src.ir.inference",
+            "args": [
+                "--normalized",
+            ]
         },
         {
             "name": "mamba",

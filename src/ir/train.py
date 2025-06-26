@@ -56,7 +56,7 @@ class ModelConf:
     # Num. of different env. temp. but
     # if set to 0 => no conditioning used.
     num_cond_embed: int = 31 # 0 or 31
-    arch: str = "" # "mambaout", "mamba", "unet", ""
+    arch: str = "mambaout" # "mambaout", "mamba", "unet", ""
 
 
 @dataclass
@@ -67,7 +67,7 @@ class DataConf:
     val_split: float = 0.1
     key: str = "area_07"
     threshold: float = 0.33
-    normalized: bool = False
+    normalized: bool = True
     img_sz: Optional[int] = 512 # 128, 512
 
 
@@ -97,9 +97,9 @@ class TrainConf:
     use_ssim: bool = False
     residual_target: bool = True  # NOTE: has no effect if predict_imag=True
     normalize_residual: bool = False  # NOTE: has no effect if predict_imag=True
-    decay_groups: bool = True  # TODO
+    decay_groups: bool = True
     predict_image: bool = True
-    add_residual: bool = False
+    add_residual: bool = True
     # Select loss variations via "objective"
     objective: str = "PERC"  # L2, L1, PERC, GAN; default=L2
     perc_weight: float = 2.0
@@ -646,6 +646,8 @@ if __name__ == "__main__":
             1,
             (64, 128, 256),
             (2, 2, 3),
+            # (96, 192, 384), 
+            # (2, 8, 2),
             num_class_embeds,
             oss_refine_blocks=2,
             local_embeds=False,
@@ -669,9 +671,16 @@ if __name__ == "__main__":
         2025-06-03_13-30-44 AE ~0.6 Million Params (9GB VRAM)
         2025-06-03_14-10-19 drop_path 0.2 "with_stem" ~4.6 Million Params (7.2GB VRAM)
         2025-06-03_15-14-04 add_residual=True AE
-        2025-06-03_15-51-29 add_residual=False MambaOutIR
+        2025-06-03_15-51-29 add_residual=False AE
+        2025-06-04_10-24-18 add_residual=False drop_path 0.2 "with_stem" ~4.6 Million Params
         
         => normalized then add_residual otherwise do not add
+        
+        512x512 normalized=True, add_residual=True, drop_path=0.2, with_stem=True
+        2025-06-04_11-11-16 ~6.5 Million Params (Best so far)
+        2025-06-04_12-33-36 ~14.5 Million Params (9.8GB VRAM)
+        
+        TODO: https://github.com/lucidrains/maskbit-pytorch/blob/main/maskbit_pytorch/maskbit.py
         """
     elif conf.model.arch == "unet":
         raise NotImplementedError
@@ -917,19 +926,18 @@ if __name__ == "__main__":
                         aos_normalized = (aos - aos_mean) / aos_std
 
                         # Working with env. temp. from 0 to Tmax (int) as conditions
-                        if isinstance(model, VmambaIR):
+                        if isinstance(model, (VmambaIR, MambaOutIR)):
                             if model.local_embeds:  # Local embedding
-                                pred_res_or_img = model(aos_normalized, None, et)
+                                pred_res_or_img = model(aos_normalized, None, et, conf.add_residual)
                             elif model.embedding is not None:  # Global embedding
-                                pred_res_or_img = model(aos_normalized, et)
+                                pred_res_or_img = model(aos_normalized, et, None, conf.add_residual)
                             else:  # No embedding
-                                pred_res_or_img = model(aos_normalized)
+                                pred_res_or_img = model(aos_normalized, None, None, conf.add_residual)
                         else:  # Other models
                             if model.embedding is not None:
-                               
-                                pred_res_or_img = model(aos_normalized, et)
+                                pred_res_or_img = model(aos_normalized, et, conf.add_residual)
                             else:
-                                pred_res_or_img = model(aos_normalized)
+                                pred_res_or_img = model(aos_normalized, None, conf.add_residual)
 
                         loss = val_criterion(pred_res_or_img, aos, gt)
                         if not isinstance(loss, torch.Tensor):
