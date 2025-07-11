@@ -6,7 +6,7 @@ from typing import Optional
 from timm.layers import trunc_normal_, DropPath
 
 from .norms import AdaLayerNorm
-from .model_utils import CondSequential
+from .model_utils import CondSequential, ScriptableCondSequential
 
 
 class StemLayer(nn.Module):
@@ -124,11 +124,15 @@ class MambaOutIR(nn.Module):
         local_embeds: bool = False,  # Each Norm Layer learns its own embedding table
         drop_path: float = 0.,
         with_stem: bool = False,
+        scriptable: bool = True,
     ):
         super().__init__()
         if len(block_out_channels) != len(oss_blocks_per_scale):
             raise ValueError("Must provide same number of `block_out_channels` and `oss_blocks_per_scale`")
 
+        if scriptable:
+            from .model_utils import ScriptableCondSequential as CondSequential
+            
         self.local_embeds = local_embeds
         embed_dim = None
         self.embedding = None
@@ -245,25 +249,29 @@ class MambaOutIR(nn.Module):
         if emb is not None:
             emb = self.embedding(emb)
 
-        residuals = ()
-        for i in range(len(self.down_blocks)):
+        residuals: list[Tensor] = []
+        for i, (down_block, downsample_block) in enumerate(zip(self.down_blocks, self.downsample_blocks)):
             x = x.permute(0, 2, 3, 1)  # BxHxWxC
-            x = self.down_blocks[i](x, emb, class_labels)  
+            x = down_block(x, emb, class_labels)  
             x = x.permute(0, 3, 1, 2)  # BxCxHxW
-            residuals += (x,)  
-            x = self.downsample_blocks[i](x)
+            residuals.append(x)
+            x = downsample_block(x)
 
         x = x.permute(0, 2, 3, 1)  # BxHxWxC
         x = self.mid_block(x, emb, class_labels)
         x = x.permute(0, 3, 1, 2)  # BxCxHxW
 
-        residuals = tuple(reversed(residuals))
-        for i in range(len(self.up_blocks)):
-            x = self.upsample_blocks[i](x)
-            x = torch.concat((x, residuals[i]), 1)
-            x = self.skip_projections[i](x)
+        # NOTE: reversed(.) is not supported in torch script!
+        reversed_residuals: list[Tensor] = []
+        for i in range(len(residuals) - 1, -1, -1):
+            reversed_residuals.append(residuals[i])
+    
+        for i, (upsample_block, skip_projection, up_block) in enumerate(zip(self.upsample_blocks, self.skip_projections, self.up_blocks)):
+            x = upsample_block(x)
+            x = torch.concat((x, reversed_residuals[i]), 1)
+            x = skip_projection(x)
             x = x.permute(0, 2, 3, 1)  # BxHxWxC
-            x = self.up_blocks[i](x, emb, class_labels)
+            x = up_block(x, emb, class_labels)
             x = x.permute(0, 3, 1, 2)  # BxCxHxW
 
         if self.refine_block is not None:

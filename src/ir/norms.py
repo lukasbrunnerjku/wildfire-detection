@@ -127,7 +127,7 @@ class AdaLayerNorm(nn.Module):
         x: torch.Tensor,
         emb: Optional[torch.Tensor] = None,
         class_labels: Optional[torch.LongTensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Expects x of shape BxHxWxC and also returns x in this shape.
         Gate is either scalar 1.0 or of shape BxCx1x1.
@@ -139,7 +139,7 @@ class AdaLayerNorm(nn.Module):
             emb = self.linear(self.silu(emb))
             if self.multiplier == 2:
                 shift, scale = emb.chunk(self.multiplier, dim=1)  # BxC
-                gate = 1.0
+                gate = torch.tensor(1.0).to(x)
             else:
                 shift, scale, gate = emb.chunk(self.multiplier, dim=1)  # BxC
                 gate = gate[:, :, None, None]  # BxCx1x1
@@ -147,7 +147,7 @@ class AdaLayerNorm(nn.Module):
             return x, gate
         else:  # Just a regular LayerNorm.
             x = self.norm(x)
-            return x, 1.0
+            return x, torch.tensor(1.0).to(x)
 
 
 class SpatialNorm(nn.Module):

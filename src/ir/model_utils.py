@@ -1,4 +1,6 @@
 import torch.nn as nn
+from torch import Tensor
+from typing import Optional
 
 
 class CondSequential(nn.Module):
@@ -14,6 +16,17 @@ class CondSequential(nn.Module):
                 x = layer(x)
         return x
     
+    
+class ScriptableCondSequential(nn.Module):
+    def __init__(self, *layers):
+        super().__init__()
+        self.layers = nn.ModuleList(layers)
+
+    def forward(self, x, cond1: Optional[Tensor], cond2: Optional[Tensor]):
+        for layer in self.layers:
+            x = layer(x, cond1, cond2)
+        return x
+
 
 if __name__ == "__main__":
     class Dummy(nn.Module):

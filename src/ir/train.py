@@ -24,7 +24,7 @@ from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMe
 
 from .ae import Autoencoder
 # from .unet import UNet
-from .mamba import VmambaIR
+# from .mamba import VmambaIR
 from .mambaout import MambaOutIR
 from .data import AOSDataset
 from .similarity import SSIM
@@ -63,7 +63,8 @@ class ModelConf:
 class DataConf:
     # Path("C:/IR/data/Batch-1.json")
     # Path("/mnt/data/wildfire/IR/Batch-1.json")
-    meta_path: Path =  Path("/home/lbrunn/projects/irdata/data/Batch-1.json")
+    # Path("/home/lbrunn/projects/irdata/data/Batch-1.json")
+    meta_path: Path = Path("C:/IR/data/Batch-1.json")
     val_split: float = 0.1
     key: str = "area_07"
     threshold: float = 0.33
@@ -120,7 +121,8 @@ class TrainConf:
     data: DataConf = field(default_factory=DataConf)
     # C:/IR/runs/autoencoder
     # "/mnt/data/wildfire/IR/runs/new"
-    runs: Path = Path("/home/lbrunn/projects/irdata/runs")  
+    # "/home/lbrunn/projects/irdata/runs"
+    runs: Path = Path("C:/IR/runs/mambaout")  
 
 
 def create_grid(
@@ -837,7 +839,8 @@ if __name__ == "__main__":
                 optimizer.zero_grad()
                 
                 # Working with env. temp. from 0 to Tmax (int) as conditions
-                if isinstance(model, (VmambaIR, MambaOutIR)):
+                # if isinstance(model, (VmambaIR, MambaOutIR)):
+                if isinstance(model, MambaOutIR):
                     if model.local_embeds:  # Local embedding
                         pred_res_or_img = model(aos_normalized, None, et, conf.add_residual)
                     elif model.embedding is not None:  # Global embedding
@@ -926,7 +929,8 @@ if __name__ == "__main__":
                         aos_normalized = (aos - aos_mean) / aos_std
 
                         # Working with env. temp. from 0 to Tmax (int) as conditions
-                        if isinstance(model, (VmambaIR, MambaOutIR)):
+                        # if isinstance(model, (VmambaIR, MambaOutIR)):
+                        if isinstance(model, MambaOutIR):
                             if model.local_embeds:  # Local embedding
                                 pred_res_or_img = model(aos_normalized, None, et, conf.add_residual)
                             elif model.embedding is not None:  # Global embedding
