@@ -26,6 +26,10 @@ python -m src.ir.export "C:\IR\runs\mambaout\2025-07-11_16-47-41\checkpoints\bes
 
 # Run demo web app
 
+..in the src/ir/app/config.yaml file set checkpoint location of the exported model accordingly:
+
+checkpoint: "C:/IR/runs/mambaout/2025-07-11_16-47-41/checkpoints/scripted_model.pt"
+
 cd \src\ir\app
 
 streamlit run homepage.py
