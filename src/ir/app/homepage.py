@@ -36,7 +36,7 @@ def load_image(uploaded_file) -> torch.Tensor:
     #     cv2.imread(str(p), -1)[:, :, 0]
     # )  # in [0, 255]; pixel; HxW; uint8
     return torch.from_numpy(
-        np.asarray(Image.open(uploaded_file))[:, :, 0]
+        np.array(Image.open(uploaded_file))[:, :, 0]
     )  # uint8; HxW
 
     
