@@ -15,3 +15,5 @@ scikit-image
 timm==1.0.15
 streamlit==1.46.0
 streamlit-image-comparison==0.0.4
+scikit-learn
+seaborn
