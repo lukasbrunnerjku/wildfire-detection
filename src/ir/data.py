@@ -13,6 +13,30 @@ from .utils import load_xy
 
 
 class LargeAOSDataset(Dataset):
+    def __init__(
+        self,
+        folders: list[Path],
+        normalized: bool = False,
+    ):
+        self.folders = folders
+        self.normalized = normalized
+
+    def __len__(self):
+        return len(self.folders)
+
+    def __getitem__(self, idx):
+        folder = self.folders[idx]  # ie. /Batch-1/27/abc30f62e9ba47cab97c3ef3850a114d
+        et = int(folder.parent.name)  # Environment Temperature (ET)
+        x, y = load_xy(folder, normalized=self.normalized)
+        return {
+            "AOS": x,
+            "GT": y,
+            "ET": et,
+            "IDX": idx,
+        }
+
+
+class LargeAOSDatsetBuilder:
     def __init__(self, root: Path):
         """
         https://github.com/qubvel-org/segmentation_models.pytorch
@@ -57,28 +81,48 @@ class LargeAOSDataset(Dataset):
             ...
         """
         super().__init__()
-        dfs = []
-        batch_folders = [f for f in root.iterdir() if f.is_dir()]
-        for batch_folder in batch_folders:
-            csv_file = root / f"{batch_folder.name}.csv"
-            
-            if csv_file.exists():
-                print(f"Load: {csv_file}")
-                df = pd.read_csv(csv_file)
-            else:
-                print(f"Working on: {batch_folder}")
-                df = self.build_table(batch_folder)
-                df.to_csv(csv_file)
-                
-            dfs.append(df)
-            
-        # Merge all dataframes together
-        df = pd.concat(dfs, ignore_index=True)
+        train_csv_file = root / "train.csv"
+        test_csv_file = root / "test.csv"
         
-        train_df, test_df = self.stratified_split(df, bins=10)
-        train_df.to_csv(root / "train.csv")
-        test_df.to_csv(root / "test.csv")
-        self.compare_distributions(train_df, test_df, bins=10)
+        if train_csv_file.exists() and test_csv_file.exists():
+            print(f"Load: {train_csv_file} and {test_csv_file}")
+            train_df = pd.read_csv(train_csv_file)
+            test_df = pd.read_csv(test_csv_file)
+        else:
+            dfs = []
+            batch_folders = [f for f in root.iterdir() if f.is_dir()]
+            for batch_folder in batch_folders:
+                csv_file = root / f"{batch_folder.name}.csv"
+                
+                if csv_file.exists():
+                    print(f"Load: {csv_file}")
+                    df = pd.read_csv(csv_file)
+                else:
+                    print(f"Working on: {batch_folder}")
+                    df = self.build_table(batch_folder)
+                    df.to_csv(csv_file)
+                    
+                dfs.append(df)
+                
+            # Merge all dataframes together
+            df = pd.concat(dfs, ignore_index=True)
+            
+            train_df, test_df = self.stratified_split(df, bins=10)
+            train_df.to_csv(train_csv_file)
+            test_df.to_csv(test_csv_file)
+            self.compare_distributions(train_df, test_df, bins=10)
+        
+        self.train_df = train_df
+        self.test_df = test_df
+    
+    def get_dataset(self, split: str = "train", **kwargs) -> LargeAOSDataset:
+        if split == "train":
+            folders = self.train_df["aos_folder"]
+        elif split == "test":
+            folders = self.test_df["aos_folder"]
+        else:
+            raise ValueError(f"Unknown argument {split=}")
+        return LargeAOSDataset(folders, **kwargs)
         
     def compare_distributions(self, train_df: pd.DataFrame, test_df: pd.DataFrame, bins: int):
         # Set plotting style
@@ -193,11 +237,6 @@ class LargeAOSDataset(Dataset):
         print(df.head(10))
         return df
                 
-        
-if __name__ == "__main__":
-    root = Path(r"C:\IR\data")
-    ds = LargeAOSDataset(root)
-    
 
 class AOSDataset(Dataset):
     def __init__(
@@ -273,6 +312,26 @@ class AOSDataset(Dataset):
         return train_ds, val_ds 
 
 
+if __name__ == "__main__":
+    root = Path(r"C:\IR\data")
+    builder = LargeAOSDatsetBuilder(root)
+    train_ds = builder.get_dataset("train", normalized=True)
+    test_ds = builder.get_dataset("test", normalized=True)
+    
+    from torch.utils.data import DataLoader
+    
+    train_dl = DataLoader(train_ds, batch_size=2, shuffle=True)
+    test_dl = DataLoader(test_ds, batch_size=2, shuffle=True)
+
+    for batch in train_dl:
+        print(batch["AOS"].shape, batch["GT"].shape, batch["IDX"].shape, batch["ET"].shape)
+        break
+    
+    for batch in test_dl:
+        print(batch["AOS"].shape, batch["GT"].shape, batch["IDX"].shape, batch["ET"].shape)
+        break
+    
+    
 # if __name__ == "__main__":
 #     meta_path = Path("/mnt/data/wildfire/IR/Batch-1.json")
 #     dataset = AOSDataset(None, meta_path, "area_07", 0.33)
@@ -284,5 +343,5 @@ class AOSDataset(Dataset):
 
 #     dataloader = DataLoader(dataset, batch_size=2, shuffle=True)
 #     for batch in dataloader:
-#         print(batch["AOS"].shape, batch["GT"].shape, batch["Residual"].shape, batch["ET"].shape)
+#         print(batch["AOS"].shape, batch["GT"].shape, batch["IDX"].shape, batch["ET"].shape)
 #         break
