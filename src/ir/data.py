@@ -15,9 +15,11 @@ from .utils import load_xy
 class LargeAOSDataset(Dataset):
     def __init__(
         self,
-        folders: list[Path],
+        root: Path,
+        folders: list[Path],  # Relative to "root"
         normalized: bool = False,
     ):
+        self.root = root
         self.folders = folders
         self.normalized = normalized
 
@@ -25,7 +27,7 @@ class LargeAOSDataset(Dataset):
         return len(self.folders)
 
     def __getitem__(self, idx):
-        folder = self.folders[idx]  # ie. /Batch-1/27/abc30f62e9ba47cab97c3ef3850a114d
+        folder: Path = self.root / self.folders[idx]  # */Batch-1/27/abc30f62e9ba47cab97c3ef3850a114d
         et = int(folder.parent.name)  # Environment Temperature (ET)
         x, y = load_xy(folder, normalized=self.normalized)
         return {
@@ -37,7 +39,7 @@ class LargeAOSDataset(Dataset):
 
 
 class LargeAOSDatsetBuilder:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, log_file: str = "log.txt"):
         """
         https://github.com/qubvel-org/segmentation_models.pytorch
         
@@ -81,6 +83,12 @@ class LargeAOSDatsetBuilder:
             ...
         """
         super().__init__()
+        self.root = root
+        self.log_file = root / log_file
+        # Create an empty log file (overwrite if exists)
+        with open(self.log_file, "w") as fp:
+            pass  # This creates an empty file
+        
         train_csv_file = root / "train.csv"
         test_csv_file = root / "test.csv"
         
@@ -117,12 +125,12 @@ class LargeAOSDatsetBuilder:
     
     def get_dataset(self, split: str = "train", **kwargs) -> LargeAOSDataset:
         if split == "train":
-            folders = self.train_df["aos_folder"]
+            folders = [Path(p) for p in self.train_df["aos_folder"]]
         elif split == "test":
-            folders = self.test_df["aos_folder"]
+            folders = [Path(p) for p in self.test_df["aos_folder"]]
         else:
             raise ValueError(f"Unknown argument {split=}")
-        return LargeAOSDataset(folders, **kwargs)
+        return LargeAOSDataset(self.root, folders, **kwargs)
         
     def compare_distributions(self, train_df: pd.DataFrame, test_df: pd.DataFrame, bins: int):
         # Set plotting style
@@ -147,7 +155,8 @@ class LargeAOSDatsetBuilder:
         plt.legend()
 
         plt.tight_layout()
-        plt.show()
+        plt.savefig(self.root / "train_test_dists.png")
+        plt.close()
                 
     def stratified_split(
         self,
@@ -186,7 +195,8 @@ class LargeAOSDatsetBuilder:
         axes[1].tick_params(axis="x", rotation=45)
 
         plt.tight_layout()
-        plt.show()
+        plt.savefig(self.root / "all_bins.png")
+        plt.close()
         
         train_df, test_df = train_test_split(
             df, 
@@ -202,39 +212,60 @@ class LargeAOSDatsetBuilder:
         for temperature_folder in tqdm(temperature_folders, desc="Processing..."):
             aos_folders = [f for f in temperature_folder.iterdir() if f.is_dir()]
             for aos_folder in aos_folders:
-                # Uniform GT texture on the forest floor?
-                with open(aos_folder / "min_max_temp_GT.txt", "r") as fp:
-                    line = fp.read()
-                    min_temp, max_temp = line.split(" ")[0].split(",")
-                    uniform_tex = int(min_temp == max_temp)
+                min_max_file = aos_folder / "min_max_temp_GT.txt"
+                param_file = aos_folder / "scene_parameters.txt"
                 
-                # Env. temp.? Tree density?
-                with open(aos_folder / "scene_parameters.txt") as fp:
-                    """
-                    Selected Env temp: 1
-                    Selected thermal texture: 0057273.TIF
-                    Number of trees per hectare: 117
-                    Direct lightsun effect: 12
-                    Added lightsun effect based on the Azimuth angle: 6
-                    Azimuth angle (Alpha) in degrees: -62.437380577215286
-                    Tree top temperature: 4°C / 277.15K
-                    """
-                    lines = fp.readlines()
-                    env_temp = int(lines[0].split(":")[1].strip())
-                    tree_density = int(lines[2].split(":")[1].strip())
-                    
-                row_list.append({
-                    "aos_folder": str(aos_folder.relative_to(root)),
-                    "env_temp": env_temp,
-                    "uniform_tex": uniform_tex,
-                    "tree_density": tree_density,
-                })
+                incomplete = False
+                if min_max_file.exists() and param_file.exists():
+                    # Uniform GT texture on the forest floor?
+                    with open(min_max_file, "r") as fp:
+                        line = fp.read()
+                        min_temp, max_temp = line.split(" ")[0].split(",")
+                        uniform_tex = int(min_temp == max_temp)
+                
+                    # Env. temp.? Tree density?
+                    with open(param_file, "r") as fp:
+                        """
+                        Selected Env temp: 1
+                        Selected thermal texture: 0057273.TIF
+                        Number of trees per hectare: 117
+                        Direct lightsun effect: 12
+                        Added lightsun effect based on the Azimuth angle: 6
+                        Azimuth angle (Alpha) in degrees: -62.437380577215286
+                        Tree top temperature: 4°C / 277.15K
+                        """
+                        lines = fp.readlines()
+                        env_temp = int(lines[0].split(":")[1].strip())
+                        tree_density = int(lines[2].split(":")[1].strip())
+                else:  # Some meta data is missing
+                    incomplete = True
+                    with open(self.log_file, "a") as f:
+                        f.write(f"{aos_folder}\n")
+                
+                if not incomplete:
+                    # Check for core data completeness
+                    files_to_check = [
+                        aos_folder / "GT.tiff",
+                        aos_folder / "integrall_0.png",
+                        aos_folder / "label.png",
+                    ]
+                    incomplete = sum(int(p.exists()) for p in files_to_check) != len(files_to_check)
+                
+                if incomplete:
+                    print(f"Incomplete: {aos_folder=}")
+                else:
+                    row_list.append({
+                        "aos_folder": str(aos_folder.relative_to(root.parent)),
+                        "env_temp": env_temp,
+                        "uniform_tex": uniform_tex,
+                        "tree_density": tree_density,
+                    })
                 
         df = pd.DataFrame(
             row_list,
             columns=["aos_folder", "env_temp", "uniform_tex", "tree_density"],
         )
-        print(df.head(10))
+        print(df.head(3))
         return df
                 
 
@@ -313,10 +344,10 @@ class AOSDataset(Dataset):
 
 
 if __name__ == "__main__":
-    root = Path(r"C:\IR\data")
+    root = Path("/mnt/data/wildfire/IR/root")
     builder = LargeAOSDatsetBuilder(root)
-    train_ds = builder.get_dataset("train", normalized=True)
-    test_ds = builder.get_dataset("test", normalized=True)
+    train_ds = builder.get_dataset("train", normalized=False)
+    test_ds = builder.get_dataset("test", normalized=False)
     
     from torch.utils.data import DataLoader
     

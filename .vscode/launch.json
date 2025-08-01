@@ -12,6 +12,16 @@
             "module": "src.ir.similarity"
         },
         {
+            "name": "unzip",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.ir.unzip",
+            "args": [
+                "/mnt/data/wildfire/IR/Batch-7.zip",
+                "/mnt/data/wildfire/IR"
+            ]
+        },
+        {
             "name": "train",
             "type": "debugpy",
             "request": "launch",
