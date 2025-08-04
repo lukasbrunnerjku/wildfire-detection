@@ -27,7 +27,7 @@ from .ae import Autoencoder
 # from .mamba import VmambaIR
 from .mambaout import MambaOutIR
 from .data import AOSDataset
-from .similarity import SSIM
+from .similarity import SSIM, get_ssim
 from .utils import load_center_view, drone_flight_gif
 from ..utils.image import tone_mapping, pil_make_grid, to_zero_one_range
 from ..utils.weight_decay import weight_decay_parameter_split
@@ -173,23 +173,6 @@ def create_grid(
             
     grid = pil_make_grid(tonemapped, ncol=ncol)
     return grid
-
-
-@torch.no_grad()
-def get_ssim(model, aos: Tensor, gt: Tensor) -> Tensor:
-    """More similar regions should be punished more if incorrect."""
-    x = TF.normalize(aos, aos.mean(), aos.std())  # Bx1xHxW
-    y = TF.normalize(gt, gt.mean(), gt.std())  # Bx1xHxW
-
-    dxy = float(torch.max(x.max(), y.max())) - float(torch.min(x.min(), y.min()))
-
-    ssim = model(
-        x, y,
-        data_range=dxy,
-        nonnegative_ssim=True,
-        size_average=False
-    )
-    return ssim  # Bx1xHxW
 
 
 class ImageCriterion(nn.Module):

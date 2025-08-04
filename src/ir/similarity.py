@@ -203,90 +203,100 @@ class SSIM(nn.Module):
             K=self.K,
             nonnegative_ssim=nonnegative_ssim,
         )
+        
 
+@torch.no_grad()
+def get_ssim(model: SSIM, aos: Tensor, gt: Tensor) -> Tensor:
+    """More similar regions should be punished more if incorrect."""
+    x = TF.normalize(aos, aos.mean(), aos.std())  # Bx1xHxW
+    y = TF.normalize(gt, gt.mean(), gt.std())  # Bx1xHxW
+
+    dxy = float(torch.max(x.max(), y.max())) - float(torch.min(x.min(), y.min()))
+
+    ssim: Tensor = model(
+        x, y,
+        data_range=dxy,
+        nonnegative_ssim=True,
+        size_average=False
+    )
+    return ssim.clip(max=1.0)  # Bx1xHxW; in [0.0, 1.0]
+
+
+def dilation(x: Tensor, k=3, s=1, p=1) -> Tensor:
+    return F.max_pool2d(x, k, s, p)
+
+
+def erosion(x: Tensor, k=3, s=1, p=1) -> Tensor:  # min pool
+    return -F.max_pool2d(-x, k, s, p)
+
+
+def morph(x: Tensor, n=3) -> Tensor:
+    for _ in range(n):
+        x = dilation(x)
+    for _ in range(n):
+        x = erosion(x)
+    return x
+
+
+def visualize(fp: str, aos: Tensor, gt: Tensor, hm: Tensor):
+    from ..utils.image import tone_mapping
+    
+    _min, _max = float(gt.min()), float(gt.max())
+    
+    aos_map = tone_mapping(
+        aos[None, None, ...], _min, _max, return_tensor=True
+    )  # 1x3xHxW
+    aos_map = aos_map[0].permute(1, 2, 0)  # HxWx3
+    
+    gt_map = tone_mapping(
+        gt[None, None, ...], _min, _max, return_tensor=True
+    )  # 1x3xHxW
+    gt_map = gt_map[0].permute(1, 2, 0)  # HxWx3
+    
+    residual = gt - aos  # HxW
+    mask = morph((hm > 0.6).to(dtype=torch.float32)[None, None, ...])[0, 0, ...]
+    pred = aos + mask * residual
+    pred_map = tone_mapping(
+        pred[None, None, ...], _min, _max, return_tensor=True
+    )  # 1x3xHxW
+    pred_map = pred_map[0].permute(1, 2, 0)  # HxWx3
+    
+    fig, axes = plt.subplots(1, 5, figsize=(20, 4))
+    
+    # Plot RGB images
+    axes[0].imshow(gt_map)
+    axes[0].set_title("GT")
+    axes[0].axis("off")
+    
+    axes[1].imshow(aos_map)
+    axes[1].set_title("AOS")
+    axes[1].axis("off")
+    
+    # Plot heatmap
+    im = axes[2].imshow(hm, vmin=0.0, vmax=1.0)
+    axes[2].set_title("Heatmap")
+    axes[2].axis("off")  # remove ticks
+    # Add colorbar for heatmap
+    fig.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
+    
+    axes[3].imshow(mask, vmin=0.0, vmax=1.0, cmap="gray")
+    axes[3].set_title("Mask")
+    axes[3].axis("off")
+    
+    axes[4].imshow(pred_map)
+    axes[4].set_title("Pred")
+    axes[4].axis("off")
+    
+    plt.savefig(fp)
+    
 
 if __name__ == "__main__":
-    dir = "/mnt/data/wildfire/IR/Batch-1/0/101186b2bd74421681d0958ea9db264c"
-    x0, y0 = load_xy(Path(dir))
-
-    x = TF.normalize(x0[None,...], x0.mean(), x0.std())[0]  # HxW
-    y = TF.normalize(y0[None,...], y0.mean(), y0.std())[0]  # HxW
-
-    # Difference between maximum and minimum possible values
-    gmax = float(max(x.max(), y.max()))
-    gmin = float(min(x.min(), y.min()))
-    dxy = gmax - gmin
-
-    print(x.mean(), x.std(), x.min(), x.max())
-    print(y.mean(), y.std(), y.min(), y.max())
-    print(dxy)
-
-    hm_torch = ssim_torch(
-        x[None, None, ...], y[None, None, ...],
-        data_range=dxy, size_average=False,
-        win_size=7, win_sigma=1.5,
-        nonnegative_ssim=True,
-    )[0, 0, ...] # HxW; [0, 1.0]
+    dir = "/mnt/data/wildfire/IR/root/Batch-1/0/101186b2bd74421681d0958ea9db264c"
     
-    x, y = x.numpy(), y.numpy()
+    aos, gt = load_xy(Path(dir))  # HxW
+    model = SSIM()
 
-    _, hm = ssim(x, y, data_range=dxy, full=True, win_size=7)  # HxW; [-inf, 1.0]
-    hm = hm.clip(0, 1)
-
-    ax = plt.subplot(1, 2, 1)
-    ax.imshow(hm_torch, vmin=0, vmax=1)
-    ax = plt.subplot(1, 2, 2)
-    ax.imshow(hm, vmin=0, vmax=1)
-    plt.savefig("test.png")
-
-    mask = hm > 0.8
-
-    plt.clf()
-    ax = plt.subplot(1, 3, 2)
-    ax.imshow(mask, vmin=0, vmax=1)
-
-    x[~mask] = gmin
-    ax = plt.subplot(1, 3, 1)
-    ax.imshow(x, vmin=gmin, vmax=gmax)
-
-    y[~mask] = gmin
-    ax = plt.subplot(1, 3, 3)
-    ax.imshow(y, vmin=gmin, vmax=gmax)
-
-    plt.savefig("test1.png")
-
-    z = y0 - x0
-    z = z.numpy()
-
-    dT_Kelvin = 5.0
-
-    plt.clf()
-    ax = plt.subplot(1, 1, 1)
-    ax.imshow(z, vmin=-dT_Kelvin, vmax=dT_Kelvin, cmap="bwr")
-    plt.savefig("test2.png")
-
-    z[~mask] = 0
-    plt.clf()
-    ax = plt.subplot(1, 1, 1)
-    ax.imshow(z, vmin=-dT_Kelvin, vmax=dT_Kelvin, cmap="bwr")
-    plt.savefig("test3.png")
-
-    """
-    We want to measure the correct temperature, we want to decrease temperature
-    deviations introduced by AOS, can we measure unseen parts? No. Can we measure
-    partially observed parts that at least kept some of their structural appearance?
-    yes.
-
-    => Allow change only in reasonably structurally similar areas. Penalize via loss
-    objective only in those areas as well. Modelling via residuals. Utilize similarity
-    map as input to the correction algorithm, as done in inpainting.
-
-    Should we let a correction algorithm alter the structure fundamentally? No, not
-    if it has not been provided more than just the AOS image. No proper structural
-    change could be causaly explained. Keep in mind we want to minimize halucinations.
-
-    => Introduce auxilary loss based on ssim but thresholded to not penalize above ie.
-    a threshold of 0.8 (as small changes could be reasonable).
-
-    https://jku.zoom.us/j/95409146168?pwd=ZpVKsuFyfFtlha7uXt7Cj3qSMms8hK.1 
-    """
+    hm = get_ssim(model, aos[None, None, ...], gt[None, None, ...])[0, 0, ...]  # HxW
+    
+    visualize("/mnt/data/wildfire/IR/test.png", aos, gt, hm)
+    

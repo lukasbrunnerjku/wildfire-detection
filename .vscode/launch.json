@@ -80,10 +80,16 @@
             "module": "src.ir.mamba"
         },
         {
-            "name": "compare",
+            "name": "correction",
             "type": "debugpy",
             "request": "launch",
-            "module": "src.ir.compare"
+            "module": "src.ir.correction",
+            "args": [
+                "--root1",
+                "/mnt/data/wildfire/IR/root/Batch-7",
+                "--root2",
+                "/mnt/data/wildfire/IR/addon/Batch-7"
+            ]
         },
         {
             "name": "mambaout",
