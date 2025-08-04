@@ -5,12 +5,10 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from torch.utils.tensorboard import SummaryWriter
-import torchvision.transforms.functional as TF
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 from dataclasses import dataclass, field
 import numpy as np
-import random
 from pathlib import Path
 import cv2
 import os
@@ -20,7 +18,6 @@ import sys
 import time
 import json
 from typing import Optional
-from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
 
 from .ae import Autoencoder
 # from .unet import UNet
@@ -28,22 +25,11 @@ from .ae import Autoencoder
 from .mambaout import MambaOutIR
 from .data import AOSDataset, get_mean_std
 from .similarity import SSIM, get_ssim
-from .utils import load_center_view, drone_flight_gif
-from ..utils.image import tone_mapping, pil_make_grid, to_zero_one_range
+from .utils import load_center_view, drone_flight_gif, setup_torch
+from ..utils.image import create_grid
 from ..utils.weight_decay import weight_decay_parameter_split
 from ..vqvae.perceptual_loss import PerceptualLoss
 from ..vqvae.gan import AdversarialLoss
-
-def setup_torch(seed: int):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    if torch.cuda.is_available():
-        torch.set_float32_matmul_precision("medium")
-        torch.backends.cudnn.benchmark = True
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
 
 
 @dataclass
@@ -123,56 +109,6 @@ class TrainConf:
     # "/mnt/data/wildfire/IR/runs/new"
     # "/home/lbrunn/projects/irdata/runs"
     runs: Path = Path("C:/IR/runs/mambaout")  
-
-
-def create_grid(
-    ncol: int,
-    *imgs_list: list[Tensor],
-    colormaps=None,
-    min_max: Optional[tuple[float, float]] = None,
-    min_max_idx: Optional[int] = None,
-    percentiles: Optional[tuple[float, float]] = None,
-):
-    """
-    Either all min/max related arguments are None, or...
-    min_max is not None and min_max_idx is None or...
-    min_max is None and min_max_idx is not None...
-
-    If min_max is given directly the "percentiles" argument has no effect.
-
-    Even with percentiles=(0.0, 99.9) we lose the contrast to the peak of
-    ground fire in the tone mapped image. Thus, recommandation against the
-    use of percentiles.
-    """
-    if colormaps is None:
-        colormaps = [cv2.COLORMAP_INFERNO] * len(imgs_list)
-    
-    def get_min_max(x: Tensor, percentiles: Optional[tuple[float, float]] = None):
-        if percentiles is not None:
-            flat = x.numpy().reshape(-1)
-            _min = float(np.percentile(flat, percentiles[0]))
-            _max = float(np.percentile(flat, percentiles[1]))
-        else:
-            _min, _max = float(x.min()), float(x.max())
-        
-        return _min, _max
-
-    if min_max_idx is not None:
-        imgs = imgs_list[min_max_idx][:ncol]
-        min_max = get_min_max(imgs, percentiles)
-    
-    tonemapped = []
-    for colormap, imgs in zip(colormaps, imgs_list):
-        for img in imgs[:ncol]:
-            if min_max is None:
-                img_min_max = get_min_max(img, percentiles)
-            else:
-                img_min_max = min_max
-
-            tonemapped.append(tone_mapping(img, *img_min_max, colormap))
-            
-    grid = pil_make_grid(tonemapped, ncol=ncol)
-    return grid
 
 
 class ImageCriterion(nn.Module):
@@ -342,38 +278,7 @@ class ResidualCriterion(nn.Module):
         return loss
         
 
-class Metrics(nn.Module):
 
-    def __init__(self, ):
-        super().__init__()
-        self.psnr = PeakSignalNoiseRatio(data_range=1.0)
-        self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
-
-    def update(self, preds: Tensor, target: Tensor) -> None:
-        new_preds = []
-        new_target = []
-        for p, t in zip(preds, target):
-            min_t, max_t = t.min(), t.max()
-            p = to_zero_one_range(p, min=min_t, max=max_t)
-            t = to_zero_one_range(t , min=min_t, max=max_t)
-            new_preds.append(p)
-            new_target.append(t)
-        
-        new_preds = torch.stack(new_preds, 0)
-        new_target = torch.stack(new_target, 0)
-
-        self.psnr.update(new_preds, new_target)
-        self.ssim.update(new_preds, new_target)
-
-    def compute(self):
-        return {
-            "psnr": self.psnr.compute(),
-            "ssim": self.ssim.compute(),
-        }
-    
-    def reset(self):
-        self.psnr.reset()
-        self.ssim.reset()
 
 
 def to_image(pred_res_or_img, aos, aos_std, aos_mean, conf):

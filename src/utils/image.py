@@ -209,3 +209,53 @@ def create_gif_with_text(
 
     except Exception as e:
         print(f"An error occurred: {e}")
+
+
+def create_grid(
+    ncol: int,
+    *imgs_list: list[Tensor],
+    colormaps=None,
+    min_max: Optional[tuple[float, float]] = None,
+    min_max_idx: Optional[int] = None,
+    percentiles: Optional[tuple[float, float]] = None,
+):
+    """
+    Either all min/max related arguments are None, or...
+    min_max is not None and min_max_idx is None or...
+    min_max is None and min_max_idx is not None...
+
+    If min_max is given directly the "percentiles" argument has no effect.
+
+    Even with percentiles=(0.0, 99.9) we lose the contrast to the peak of
+    ground fire in the tone mapped image. Thus, recommandation against the
+    use of percentiles.
+    """
+    if colormaps is None:
+        colormaps = [cv2.COLORMAP_INFERNO] * len(imgs_list)
+    
+    def get_min_max(x: Tensor, percentiles: Optional[tuple[float, float]] = None):
+        if percentiles is not None:
+            flat = x.numpy().reshape(-1)
+            _min = float(np.percentile(flat, percentiles[0]))
+            _max = float(np.percentile(flat, percentiles[1]))
+        else:
+            _min, _max = float(x.min()), float(x.max())
+        
+        return _min, _max
+
+    if min_max_idx is not None:
+        imgs = imgs_list[min_max_idx][:ncol]
+        min_max = get_min_max(imgs, percentiles)
+    
+    tonemapped = []
+    for colormap, imgs in zip(colormaps, imgs_list):
+        for img in imgs[:ncol]:
+            if min_max is None:
+                img_min_max = get_min_max(img, percentiles)
+            else:
+                img_min_max = min_max
+
+            tonemapped.append(tone_mapping(img, *img_min_max, colormap))
+            
+    grid = pil_make_grid(tonemapped, ncol=ncol)
+    return grid
