@@ -26,7 +26,7 @@ from .ae import Autoencoder
 # from .unet import UNet
 # from .mamba import VmambaIR
 from .mambaout import MambaOutIR
-from .data import AOSDataset
+from .data import AOSDataset, get_mean_std
 from .similarity import SSIM, get_ssim
 from .utils import load_center_view, drone_flight_gif
 from ..utils.image import tone_mapping, pil_make_grid, to_zero_one_range
@@ -341,58 +341,6 @@ class ResidualCriterion(nn.Module):
         
         return loss
         
-
-class MeanStdCalculator:
-
-    def __init__(self):
-        self.psum    = torch.tensor([0.0], dtype=torch.float64)
-        self.psum_sq = torch.tensor([0.0], dtype=torch.float64)
-        self.n_pixel = torch.tensor([0.0], dtype=torch.float64)
-
-    def update(self, x: Tensor):
-        B, H, W = x.shape
-        self.psum    += x.sum()
-        self.psum_sq += (x ** 2).sum()
-        self.n_pixel += B * H * W
-
-    def compute(self) -> tuple[Tensor, Tensor]:
-        """
-        mean := E[X]
-        std := sqrt(E[X^2] - (E[X])^2)
-        """
-        mean = self.psum / self.n_pixel
-        var  = (self.psum_sq / self.n_pixel) - (mean ** 2)
-        std  = torch.sqrt(var)
-        return mean, std
-    
-
-def get_mean_std(dl: DataLoader):
-    aos_calc = MeanStdCalculator()
-    gt_calc = MeanStdCalculator()
-    res_calc = MeanStdCalculator()
-
-    for batch in tqdm(dl, "Calculating mean / std..."):
-        x = batch["AOS"]  # BxHxW
-        y = batch["GT"]  # BxHxW
-        z = y - x   
-
-        aos_calc.update(x)
-        gt_calc.update(y)
-        res_calc.update(z)
-        
-    x_mean, x_std = aos_calc.compute()    
-    y_mean, y_std = gt_calc.compute()    
-    z_mean, z_std = res_calc.compute()    
-
-    return {
-        "AOS_mean": float(x_mean),
-        "AOS_std": float(x_std),
-        "GT_mean": float(y_mean),
-        "GT_std": float(y_std),
-        "RES_mean": float(z_mean),
-        "RES_std": float(z_std),
-    }
-
 
 class Metrics(nn.Module):
 

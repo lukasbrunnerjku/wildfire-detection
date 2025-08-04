@@ -243,23 +243,14 @@ def visualize(fp: str, aos: Tensor, gt: Tensor, hm: Tensor):
     
     _min, _max = float(gt.min()), float(gt.max())
     
-    aos_map = tone_mapping(
-        aos[None, None, ...], _min, _max, return_tensor=True
-    )  # 1x3xHxW
-    aos_map = aos_map[0].permute(1, 2, 0)  # HxWx3
+    # NOTE: *_map are PIL Image objects!
+    aos_map = tone_mapping(aos[None, ...], _min, _max)
+    gt_map = tone_mapping(gt[None, ...], _min, _max)
     
-    gt_map = tone_mapping(
-        gt[None, None, ...], _min, _max, return_tensor=True
-    )  # 1x3xHxW
-    gt_map = gt_map[0].permute(1, 2, 0)  # HxWx3
-    
-    residual = gt - aos  # HxW
+    # 1 ... gt and aos have similar structure => apply correction
     mask = morph((hm > 0.6).to(dtype=torch.float32)[None, None, ...])[0, 0, ...]
-    pred = aos + mask * residual
-    pred_map = tone_mapping(
-        pred[None, None, ...], _min, _max, return_tensor=True
-    )  # 1x3xHxW
-    pred_map = pred_map[0].permute(1, 2, 0)  # HxWx3
+    pred = (1.0 - mask) * aos + mask * gt
+    pred_map = tone_mapping(pred[None, ...], _min, _max)
     
     fig, axes = plt.subplots(1, 5, figsize=(20, 4))
     
@@ -287,7 +278,9 @@ def visualize(fp: str, aos: Tensor, gt: Tensor, hm: Tensor):
     axes[4].set_title("Pred")
     axes[4].axis("off")
     
+    plt.tight_layout(pad=1.1)
     plt.savefig(fp)
+    plt.close()
     
 
 if __name__ == "__main__":

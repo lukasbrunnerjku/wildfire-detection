@@ -43,7 +43,11 @@
             "name": "data",
             "type": "debugpy",
             "request": "launch",
-            "module": "src.ir.data"
+            "module": "src.ir.data",
+            "args": [
+                "--normalized",
+                "--drop_uniform",
+            ]
         },
         {
             "name": "ae",
@@ -96,6 +100,12 @@
             "type": "debugpy",
             "request": "launch",
             "module": "src.ir.mambaout"
+        },
+        {
+            "name": "segment",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.ir.segment"
         },
     ]
 }

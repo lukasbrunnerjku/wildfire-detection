@@ -8,6 +8,9 @@ import pandas as pd
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 import seaborn as sns
+import torch
+from torch import Tensor
+from torch.utils.data import DataLoader
 
 from .utils import load_xy
 
@@ -123,13 +126,30 @@ class LargeAOSDatsetBuilder:
         self.train_df = train_df
         self.test_df = test_df
     
-    def get_dataset(self, split: str = "train", **kwargs) -> LargeAOSDataset:
+    def get_dataset(
+        self,
+        split: str = "train",
+        drop_uniform: bool = True,
+        **kwargs,
+    ) -> LargeAOSDataset:
         if split == "train":
-            folders = [Path(p) for p in self.train_df["aos_folder"]]
+            df = self.train_df
         elif split == "test":
-            folders = [Path(p) for p in self.test_df["aos_folder"]]
+            df = self.test_df
         else:
             raise ValueError(f"Unknown argument {split=}")
+        
+        if drop_uniform:
+            n_total = 0
+            folders = []
+            for row in df.itertuples(index=False):
+                n_total += 1
+                if row.uniform_tex == 0:
+                    folders.append(Path(row.aos_folder))
+            print(f"Dropped uniform textures, reduced rows from {n_total} to {len(folders)}.")
+        else:
+            folders = [Path(p) for p in df["aos_folder"]]
+            
         return LargeAOSDataset(self.root, folders, **kwargs)
         
     def compare_distributions(self, train_df: pd.DataFrame, test_df: pd.DataFrame, bins: int):
@@ -341,15 +361,79 @@ class AOSDataset(Dataset):
             self.normalized,
         )
         return train_ds, val_ds 
+    
+
+class MeanStdCalculator:
+
+    def __init__(self):
+        self.psum    = torch.tensor([0.0], dtype=torch.float64)
+        self.psum_sq = torch.tensor([0.0], dtype=torch.float64)
+        self.n_pixel = torch.tensor([0.0], dtype=torch.float64)
+
+    def update(self, x: Tensor):
+        B, H, W = x.shape
+        self.psum    += x.sum()
+        self.psum_sq += (x ** 2).sum()
+        self.n_pixel += B * H * W
+
+    def compute(self) -> tuple[Tensor, Tensor]:
+        """
+        mean := E[X]
+        std := sqrt(E[X^2] - (E[X])^2)
+        """
+        mean = self.psum / self.n_pixel
+        var  = (self.psum_sq / self.n_pixel) - (mean ** 2)
+        std  = torch.sqrt(var)
+        return mean, std
+    
+    
+def get_mean_std(dl: DataLoader):
+    aos_calc = MeanStdCalculator()
+    gt_calc = MeanStdCalculator()
+    res_calc = MeanStdCalculator()
+
+    for batch in tqdm(dl, "Calculating mean / std..."):
+        aos = batch["AOS"]  # BxHxW
+        gt = batch["GT"]  # BxHxW
+        res = gt - aos
+
+        aos_calc.update(aos)
+        gt_calc.update(gt)
+        res_calc.update(res)
+        
+    aos_mean, aos_std = aos_calc.compute()    
+    gt_mean, gt_std = gt_calc.compute()    
+    res_mean, res_std = res_calc.compute()    
+
+    return {
+        "AOS_mean": float(aos_mean),
+        "AOS_std": float(aos_std),
+        "GT_mean": float(gt_mean),
+        "GT_std": float(gt_std),
+        "RES_mean": float(res_mean),
+        "RES_std": float(res_std),
+    }
 
 
 if __name__ == "__main__":
-    root = Path("/mnt/data/wildfire/IR/root")
-    builder = LargeAOSDatsetBuilder(root)
-    train_ds = builder.get_dataset("train", normalized=False)
-    test_ds = builder.get_dataset("test", normalized=False)
+    import argparse
     
-    from torch.utils.data import DataLoader
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", type=Path, default=Path("/mnt/data/wildfire/IR/root"))
+    parser.add_argument("--normalized", action="store_true")
+    parser.add_argument("--drop_uniform", action="store_true")
+    args = parser.parse_args()
+    
+    builder = LargeAOSDatsetBuilder(args.root)
+    train_ds = builder.get_dataset("train", normalized=args.normalized, drop_uniform=args.drop_uniform)
+    test_ds = builder.get_dataset("test", normalized=args.normalized, drop_uniform=args.drop_uniform)
+    
+    mean_std_file = args.root / f"mean_std_n{int(args.normalized)}_du{int(args.drop_uniform)}.json"
+    if not mean_std_file.exists():
+        train_dl = DataLoader(train_ds, batch_size=2, shuffle=True, num_workers=16)
+        train_stats = get_mean_std(train_dl)
+        with open(mean_std_file, "w") as fp:
+            json.dump(train_stats, fp, indent=4)
     
     train_dl = DataLoader(train_ds, batch_size=2, shuffle=True)
     test_dl = DataLoader(test_ds, batch_size=2, shuffle=True)
@@ -361,6 +445,14 @@ if __name__ == "__main__":
     for batch in test_dl:
         print(batch["AOS"].shape, batch["GT"].shape, batch["IDX"].shape, batch["ET"].shape)
         break
+    
+    # ~70% of data remains (drop_uniform=True)
+    """
+    Dropped uniform textures, reduced rows from 25946 to 18186.
+    Dropped uniform textures, reduced rows from 6487 to 4547.
+    torch.Size([2, 512, 512]) torch.Size([2, 512, 512]) torch.Size([2]) torch.Size([2])
+    torch.Size([2, 512, 512]) torch.Size([2, 512, 512]) torch.Size([2]) torch.Size([2])
+    """
     
     
 # if __name__ == "__main__":
