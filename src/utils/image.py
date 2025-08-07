@@ -259,3 +259,48 @@ def create_grid(
             
     grid = pil_make_grid(tonemapped, ncol=ncol)
     return grid
+
+
+def to_image(pred_res_or_img, aos, aos_std, aos_mean, conf, res_std, res_mean):
+    """Model output and configuration. Build prediction image."""
+    if conf.predict_image:
+        pred = aos_std * pred_res_or_img + aos_mean
+    else:
+        if conf.normalize_residual:
+            pred = res_std * pred_res_or_img + res_mean + aos
+        else:
+            pred = pred_res_or_img + aos
+    
+    return pred
+
+
+def log_images(
+    writer,
+    global_step,
+    phase: str,
+    pred_res_or_img,
+    aos,
+    aos_std,
+    aos_mean,
+    res_std,
+    res_mean,
+    gt,
+    conf,
+):
+    pred = to_image(pred_res_or_img, aos, aos_std, aos_mean, conf, res_std, res_mean)
+
+    grid = create_grid(
+        conf.log_n_images,
+        aos.cpu(), pred.detach().cpu(), gt.cpu(),
+        colormaps=[
+            cv2.COLORMAP_INFERNO, cv2.COLORMAP_INFERNO, cv2.COLORMAP_INFERNO
+        ],
+        min_max_idx=2,
+    )
+    writer.add_image(
+        f"{phase}/images",
+        np.asarray(grid),
+        global_step,
+        dataformats="HWC",
+    )
+    

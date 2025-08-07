@@ -29,6 +29,13 @@
             "justMyCode": false
         },
         {
+            "name": "train_large",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.ir.train_large",
+            "justMyCode": false
+        },
+        {
             "name": "preprocess",
             "type": "debugpy",
             "request": "launch",

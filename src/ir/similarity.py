@@ -9,8 +9,6 @@ from skimage.metrics import structural_similarity as ssim
 from typing import Optional
 import warnings
 
-from .utils import load_xy
-
 
 def _fspecial_gauss_1d(size: int, sigma: float) -> Tensor:
     r"""Create 1-D gauss kernel
@@ -284,6 +282,8 @@ def visualize(fp: str, aos: Tensor, gt: Tensor, hm: Tensor):
     
 
 if __name__ == "__main__":
+    from .utils import load_xy
+    
     dir = "/mnt/data/wildfire/IR/root/Batch-1/0/101186b2bd74421681d0958ea9db264c"
     
     aos, gt = load_xy(Path(dir))  # HxW

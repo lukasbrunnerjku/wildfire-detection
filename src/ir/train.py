@@ -25,8 +25,8 @@ from .ae import Autoencoder
 from .mambaout import MambaOutIR
 from .data import AOSDataset, get_mean_std
 from .similarity import SSIM, get_ssim
-from .utils import load_center_view, drone_flight_gif, setup_torch
-from ..utils.image import create_grid
+from .utils import load_center_view, drone_flight_gif, setup_torch, Metrics
+from ..utils.image import create_grid, log_images, to_image
 from ..utils.weight_decay import weight_decay_parameter_split
 from ..vqvae.perceptual_loss import PerceptualLoss
 from ..vqvae.gan import AdversarialLoss
@@ -276,77 +276,7 @@ class ResidualCriterion(nn.Module):
             loss = mse.mean()
         
         return loss
-        
-
-
-
-
-def to_image(pred_res_or_img, aos, aos_std, aos_mean, conf):
-    """Model output and configuration. Build prediction image."""
-    if conf.predict_image:
-        pred = aos_std * pred_res_or_img + aos_mean
-    else:
-        if conf.normalize_residual:
-            pred = res_std * pred_res_or_img + res_mean + aos
-        else:
-            pred = pred_res_or_img + aos
     
-    return pred
-
-
-def log_images(
-    writer,
-    global_step,
-    phase: str,
-    pred_res_or_img,
-    aos,
-    aos_std,
-    aos_mean,
-    gt,
-    conf,
-):
-    pred = to_image(pred_res_or_img, aos, aos_std, aos_mean, conf)
-
-    grid = create_grid(
-        conf.log_n_images,
-        aos.cpu(), pred.detach().cpu(), gt.cpu(),
-        colormaps=[
-            cv2.COLORMAP_INFERNO, cv2.COLORMAP_INFERNO, cv2.COLORMAP_INFERNO
-        ],
-        min_max_idx=2,
-    )
-    writer.add_image(
-        f"{phase}/images",
-        np.asarray(grid),
-        global_step,
-        dataformats="HWC",
-    )
-
-    # TODO: not visualizing properly, good images bad residual visu?!
-    # if conf.predict_image:
-    #     residual = gt - pred
-    # else:
-    #     if conf.normalize_residual:
-    #         residual = res_std * pred_res_or_img + res_mean
-    #     else:
-    #         residual = pred_res_or_img
-
-    # tgt = gt - aos
-    # grid = create_grid(
-    #     conf.log_n_images,
-    #     residual.detach().cpu(), tgt.cpu(),
-    #     colormaps=[
-    #         cv2.COLORMAP_JET, cv2.COLORMAP_JET,
-    #     ],
-    #     min_max_idx=1,
-    # )
-    # writer.add_image(
-    #     f"{phase}/residuals",
-    #     np.asarray(grid),
-    #     global_step,
-    #     dataformats="HWC",
-    # )
-
 
 if __name__ == "__main__":
     """
@@ -713,7 +643,7 @@ if __name__ == "__main__":
                 
                 total_loss += loss.item()
 
-                pred = to_image(pred_res_or_img.detach(), aos, aos_std, aos_mean, conf)
+                pred = to_image(pred_res_or_img.detach(), aos, aos_std, aos_mean, conf, res_std, res_mean)
                 metrics.update(pred, gt)
 
                 if global_step % conf.log_every == 0:
@@ -784,7 +714,7 @@ if __name__ == "__main__":
                             total_loss = loss["total_loss"]
                         val_loss += total_loss.item()
 
-                        pred = to_image(pred_res_or_img, aos, aos_std, aos_mean, conf)
+                        pred = to_image(pred_res_or_img, aos, aos_std, aos_mean, conf, res_std, res_mean)
                         metrics.update(pred, gt)
                         
                 avg_val_loss = val_loss / len(val_dataloader)
@@ -835,6 +765,8 @@ if __name__ == "__main__":
                     aos,
                     aos_std,
                     aos_mean,
+                    res_std,
+                    res_mean,
                     gt,
                     conf,
                 )
